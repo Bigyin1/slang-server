@@ -21,14 +21,16 @@ namespace server {
 
 ServerCompilationAnalysis::ServerCompilationAnalysis(
     const std::unordered_map<std::string, std::shared_ptr<SlangDoc>>& documents, Bag& options,
-    SourceManager& sourceManager) :
+    SourceManager& sourceManager,
+    const std::unordered_map<std::string, std::shared_ptr<syntax::SyntaxTree>>& pinnedTrees) :
     compilation(options),
     m_analysisOptions(options.getOrDefault<slang::analysis::AnalysisOptions>()) {
     std::vector<BufferID> bufferIds;
     std::unordered_set<BufferID> seenBuffers;
 
-    for (auto& [_, doc] : documents) {
-        auto tree = doc->getSyntaxTree();
+    for (auto& [path, doc] : documents) {
+        auto pinned = pinnedTrees.find(path);
+        auto tree = pinned == pinnedTrees.end() ? doc->getSyntaxTree() : pinned->second;
         compilation.addSyntaxTree(tree);
 
         for (auto bufferId : tree->getSourceBufferIds()) {

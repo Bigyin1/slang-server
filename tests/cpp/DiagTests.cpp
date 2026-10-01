@@ -3,6 +3,7 @@
 
 #include "utils/GoldenTest.h"
 #include "utils/ServerHarness.h"
+#include <chrono>
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
@@ -438,6 +439,131 @@ TEST_CASE("RecreatingSingleUnitBuildDoesNotShallowAnalyzeOpenBuildFile") {
     server.setBuildFile("design.f");
     REQUIRE(server.getDoc(childUri));
     CHECK_FALSE(server.getDoc(childUri)->hasAnalysis());
+}
+
+TEST_CASE("SingleUnitEditsInheritEarlierMacrosWithoutRefreshingBuild") {
+    ServerHarness server("single_unit_build");
+    server.setBuildFile("macro_design.f");
+    auto consumer = server.openFile("macro_consumer.sv");
+    auto consumerUri = URI::fromFile(fs::current_path() / "macro_consumer.sv");
+    auto refreshes = server.m_driver->comp->getRefreshCount();
+
+    consumer.replaceAll("module macro_consumer;\n"
+                        "    logic [`SHARED_WIDTH-1:0] data;\n"
+                        "    logic [`SHARED_WIDTH-1:0] extra;\n"
+                        "    $static_assert($bits(data) == 8, \"shared width changed\");\n"
+                        "endmodule\n");
+    consumer.publishChanges();
+    auto hasMacroError = [](const std::vector<lsp::Diagnostic>& diagnostics) {
+        return std::ranges::any_of(diagnostics, [](const auto& diagnostic) {
+            return diagnostic.message.find("SHARED_WIDTH") != std::string::npos;
+        });
+    };
+    CHECK_FALSE(hasMacroError(server.client.getDiagnostics(consumerUri)));
+    CHECK(server.m_driver->comp->getRefreshCount() == refreshes);
+
+    consumer.save();
+    CHECK_FALSE(hasMacroError(server.client.getDiagnostics(consumerUri)));
+    CHECK(server.m_driver->comp->getRefreshCount() == refreshes);
+}
+
+TEST_CASE("SingleUnitDirectiveEditRefreshesLaterFiles") {
+    ServerHarness server("single_unit_build");
+    server.setBuildFile("macro_design.f");
+    auto consumerUri = URI::fromFile(fs::current_path() / "macro_consumer.sv");
+    auto definitionsUri = URI::fromFile(fs::current_path() / "macro_defs.sv");
+    server.onDocDidOpen(lsp::DidOpenTextDocumentParams{
+        .textDocument = lsp::TextDocumentItem{.uri = definitionsUri,
+                                               .languageId = "systemverilog",
+                                               .version = 1,
+                                               .text = "`define SHARED_WIDTH \\\n    8\n"}});
+    auto refreshes = server.m_driver->comp->getRefreshCount();
+
+    server.onDocDidChange(lsp::DidChangeTextDocumentParams{
+        .textDocument = lsp::VersionedTextDocumentIdentifier{.uri = definitionsUri},
+        .contentChanges = {lsp::TextDocumentContentChangeWholeDocument{
+            .text = "`define SHARED_WIDTH \\\n    16\n"}}});
+    CHECK(server.m_driver->comp->getRefreshCount() == refreshes + 1);
+    auto diagnostics = server.client.getDiagnostics(consumerUri);
+    CHECK(std::ranges::any_of(diagnostics, [](const auto& diagnostic) {
+        return diagnostic.message.find("shared width changed") != std::string::npos;
+    }));
+}
+
+TEST_CASE("SingleUnitIncludedHeaderDirectiveRefreshesBuild") {
+    ServerHarness server("single_unit_build");
+    auto headerUri = URI::fromFile(fs::current_path() / "defs.svh");
+    auto childUri = URI::fromFile(fs::current_path() / "submodule.sv");
+    std::ifstream file(fs::current_path() / "defs.svh");
+    REQUIRE(file);
+    std::string original{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+    auto replacement = original;
+    auto width = replacement.find("DEFAULT_WIDTH 8");
+    REQUIRE(width != std::string::npos);
+    replacement.replace(width, std::string("DEFAULT_WIDTH 8").size(), "DEFAULT_WIDTH 32");
+    server.onDocDidOpen(lsp::DidOpenTextDocumentParams{
+        .textDocument = lsp::TextDocumentItem{.uri = headerUri,
+                                               .languageId = "systemverilog",
+                                               .version = 1,
+                                               .text = original}});
+    auto refreshes = server.m_driver->comp->getRefreshCount();
+    server.onDocDidChange(lsp::DidChangeTextDocumentParams{
+        .textDocument = lsp::VersionedTextDocumentIdentifier{.uri = headerUri},
+        .contentChanges = {lsp::TextDocumentContentChangeWholeDocument{.text = replacement}}});
+    CHECK(server.m_driver->comp->getRefreshCount() == refreshes + 1);
+    auto diagnostics = server.client.getDiagnostics(childUri);
+    CHECK_FALSE(std::ranges::any_of(diagnostics, [](const auto& diagnostic) {
+        return diagnostic.message.find("instance width differs") != std::string::npos;
+    }));
+}
+
+TEST_CASE("SingleUnitWatchedFilesUseLocalOrFullRefreshAsNeeded") {
+    auto path = fs::temp_directory_path() /
+                ("slang-server-single-unit-" + std::to_string(
+                    std::chrono::steady_clock::now().time_since_epoch().count()));
+    struct RemoveWorkspace {
+        fs::path path;
+        ~RemoveWorkspace() { fs::remove_all(path); }
+    } cleanup{path};
+    fs::create_directories(path);
+    path = fs::canonical(path);
+    {
+        std::ofstream(path / "design.f")
+            << "--single-unit\n" << (path / "macro_defs.sv").string() << '\n'
+            << (path / "macro_consumer.sv").string() << "\n-top macro_consumer\n";
+        std::ofstream(path / "macro_defs.sv") << "`define SHARED_WIDTH 8\n";
+        std::ofstream(path / "macro_consumer.sv")
+            << "module macro_consumer;\n"
+               "logic [`SHARED_WIDTH-1:0] data;\n"
+               "$static_assert($bits(data) == 8, \"shared width changed\");\n"
+               "endmodule\n";
+    }
+    auto consumerUri = URI::fromFile(path / "macro_consumer.sv");
+    auto definitionsUri = URI::fromFile(path / "macro_defs.sv");
+    ServerHarness server(lsp::InitializeParams{
+        .workspaceFolders = {{lsp::WorkspaceFolder{.uri = URI::fromFile(path),
+                                                   .name = "single-unit-watch"}}}});
+    server.setBuildFile((path / "design.f").string());
+    auto refreshes = server.m_driver->comp->getRefreshCount();
+
+    std::ofstream(path / "macro_consumer.sv", std::ios::app) << "// external edit\n";
+    server.onWorkspaceDidChangeWatchedFiles(lsp::DidChangeWatchedFilesParams{
+        .changes = {{.uri = consumerUri, .type = lsp::FileChangeType::Changed}}});
+    CHECK(server.m_driver->comp->getRefreshCount() == refreshes);
+    CHECK_FALSE(std::ranges::any_of(server.client.getDiagnostics(consumerUri),
+                                   [](const auto& diagnostic) {
+                                       return diagnostic.message.find("SHARED_WIDTH") !=
+                                              std::string::npos;
+                                   }));
+
+    std::ofstream(path / "macro_defs.sv") << "`define SHARED_WIDTH 16\n";
+    server.onWorkspaceDidChangeWatchedFiles(lsp::DidChangeWatchedFilesParams{
+        .changes = {{.uri = definitionsUri, .type = lsp::FileChangeType::Changed}}});
+    CHECK(server.m_driver->comp->getRefreshCount() == refreshes + 1);
+    auto diagnostics = server.client.getDiagnostics(consumerUri);
+    CHECK(std::ranges::any_of(diagnostics, [](const auto& diagnostic) {
+        return diagnostic.message.find("shared width changed") != std::string::npos;
+    }));
 }
 
 TEST_CASE("OpenNonBuildFileGetsShallowDiags") {

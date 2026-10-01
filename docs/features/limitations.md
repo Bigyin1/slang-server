@@ -15,7 +15,7 @@ Shallow compilations only load the directly referenced syntax trees, and only lo
 
 **Single Unit Compilations**
 
-Selected builds using slang's [`--single-unit`](https://sv-lang.com/command-line-ref.html) provide full-design diagnostics, which are preserved when unchanged build files are opened. Per-file shallow analysis still lacks macros inherited from earlier files in the compilation unit, so editing a file or opening it without the build can show missing-macro errors. Prefer explicit includes or configured defines for reliable per-file features. See [Single Unit](design/shallow.md#single-unit) for details.
+Selected builds using slang's [`--single-unit`](https://sv-lang.com/command-line-ref.html) pass macros from preceding files to local analysis during edits. Ordinary edits update local diagnostics without rebuilding the full design; full-design diagnostics remain based on the previous snapshot until a preprocessor directive changes or the build is reloaded. Files outside the selected build and compilation-unit scope declarations still have the usual standalone-analysis limitations. See [Single Unit](design/shallow.md#single-unit) for details.
 
 **Some UVM Code**
 

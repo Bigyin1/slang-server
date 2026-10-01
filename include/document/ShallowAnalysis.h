@@ -41,6 +41,7 @@ using namespace slang;
 
 class DocumentHandle;
 class ServerCompilation;
+struct MacroContext;
 
 class ShallowAnalysis {
 public:
@@ -57,7 +58,8 @@ public:
     ShallowAnalysis(SourceManager& sourceManager, slang::BufferID buffer,
                     std::shared_ptr<slang::syntax::SyntaxTree> tree, slang::Bag options,
                     const std::vector<std::shared_ptr<slang::syntax::SyntaxTree>>& allTrees = {},
-                    const ServerCompilation* design = nullptr);
+                    const ServerCompilation* design = nullptr,
+                    std::shared_ptr<const MacroContext> macroContext = nullptr);
 
     /// @brief Retrieves document symbols for LSP outline view, called right after open
     /// @return Tree of LSP document symbols representing the document CST structure
@@ -201,6 +203,7 @@ private:
 
     /// The syntax tree being analyzed
     std::shared_ptr<slang::syntax::SyntaxTree> m_tree;
+    std::shared_ptr<const MacroContext> m_macroContext;
 
     /// All syntax trees needed for the shallow compilation
     std::vector<std::shared_ptr<slang::syntax::SyntaxTree>> m_allTrees;

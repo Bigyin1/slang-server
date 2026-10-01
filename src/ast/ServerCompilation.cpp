@@ -463,9 +463,11 @@ const slang::ast::Symbol* ServerCompilation::toShallowSymbol(
 
 ServerCompilation::ServerCompilation(std::vector<std::shared_ptr<SlangDoc>> documents, Bag options,
                                      SourceManager& sourceManager, lsp::LspClient& client,
-                                     std::optional<std::string> top) :
-    m_options(std::move(options)), m_top(std::move(top)), m_sourceManager(sourceManager),
-    m_client(client) {
+                                     std::optional<std::string> top,
+                                     std::unordered_map<std::string,
+                                                        std::shared_ptr<syntax::SyntaxTree>> pinnedTrees) :
+    m_pinnedTrees(std::move(pinnedTrees)), m_options(std::move(options)),
+    m_top(std::move(top)), m_sourceManager(sourceManager), m_client(client) {
 
     m_documents.reserve(documents.size());
     for (auto& doc : documents) {
@@ -475,14 +477,14 @@ ServerCompilation::ServerCompilation(std::vector<std::shared_ptr<SlangDoc>> docu
     if (m_top) {
         m_options.insertOrGet<slang::ast::CompilationOptions>().topModules = {*m_top};
     }
-    indexModuleDocs();
     refresh();
 }
 
 void ServerCompilation::indexModuleDocs() {
     m_moduleToDoc.clear();
     for (const auto& [path, doc] : m_documents) {
-        auto tree = doc->getSyntaxTree();
+        auto pinned = m_pinnedTrees.find(path);
+        auto tree = pinned == m_pinnedTrees.end() ? doc->getSyntaxTree() : pinned->second;
         if (!tree) {
             continue;
         }
@@ -493,11 +495,18 @@ void ServerCompilation::indexModuleDocs() {
 }
 
 void ServerCompilation::refresh() {
+    indexModuleDocs();
+    ++m_refreshCount;
     m_analysis = std::make_shared<ServerCompilationAnalysis>(m_documents, m_options,
-                                                             m_sourceManager);
+                                                             m_sourceManager, m_pinnedTrees);
     m_hierarchySearchItems.clear();
     m_hierarchySearchIndexed = false;
     syncActiveInstances();
+}
+
+void ServerCompilation::setPinnedTree(std::string path,
+                                      std::shared_ptr<syntax::SyntaxTree> tree) {
+    m_pinnedTrees[std::move(path)] = std::move(tree);
 }
 
 std::vector<hier::InstanceSet> ServerCompilation::getScopesByModule() {

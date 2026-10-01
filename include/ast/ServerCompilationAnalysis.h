@@ -32,7 +32,9 @@ class ServerCompilationAnalysis {
 public:
     ServerCompilationAnalysis(
         const std::unordered_map<std::string, std::shared_ptr<SlangDoc>>& documents, Bag& options,
-        SourceManager& sourceManager);
+        SourceManager& sourceManager,
+        const std::unordered_map<std::string, std::shared_ptr<slang::syntax::SyntaxTree>>&
+            pinnedTrees = {});
 
     slang::ast::Compilation compilation;
 

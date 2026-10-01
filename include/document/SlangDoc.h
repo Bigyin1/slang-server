@@ -35,6 +35,13 @@ using namespace slang;
 class DocumentHandle;
 class ServerDriver;
 
+// Keeps the definitions inherited by a file alive, including definitions that
+// originated in earlier files of the same compilation unit.
+struct MacroContext {
+    std::shared_ptr<slang::syntax::SyntaxTree> tree;
+    std::shared_ptr<const MacroContext> previous;
+};
+
 class SlangDoc {
 private:
     /// Reference to the server driver, for grabbing other dependent documents
@@ -56,6 +63,8 @@ private:
 
     /// The syntax tree for this document
     std::shared_ptr<slang::syntax::SyntaxTree> m_tree;
+
+    std::shared_ptr<const MacroContext> m_macroContext;
 
     /// Document analysis for syntax and symbol analysis.
     /// Shared so that callers can hold the analysis alive even if getAnalysis() recreates it.
@@ -91,6 +100,9 @@ public:
 
     /// @brief Get the syntax tree, creating it if necessary
     std::shared_ptr<slang::syntax::SyntaxTree> getSyntaxTree();
+
+    void setMacroContext(std::shared_ptr<const MacroContext> context);
+    void setSyntaxTree(std::shared_ptr<slang::syntax::SyntaxTree> tree);
 
     /// @brief Check if analysis exists without creating it
     bool hasAnalysis() const { return m_analysis != nullptr && m_analysis->hasValidBuffers(); }

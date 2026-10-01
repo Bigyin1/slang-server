@@ -28,6 +28,7 @@
 #include "slang/util/FlatMap.h"
 namespace server {
 using namespace slang;
+struct MacroContext;
 
 /// @brief Manages the document handles, which include open and referenced symbols/documents.
 /// Syntax trees and options are used to build one, after flags are processed via a slang driver.
@@ -199,6 +200,21 @@ private:
 
     /// Every source file covered by the build, including secondary single-unit buffers.
     flat_hash_set<URI> m_buildSourceUris;
+
+    struct SingleUnit {
+        URI owner;
+        std::vector<URI> sources;
+        std::shared_ptr<syntax::SyntaxTree> tree;
+    };
+
+    std::vector<SingleUnit> m_singleUnits;
+    std::unordered_map<URI, std::vector<size_t>> m_singleUnitBySource;
+    std::unordered_map<URI, std::shared_ptr<const MacroContext>> m_singleUnitContexts;
+    std::unordered_map<URI, std::string> m_directiveSignatures;
+
+    void initializeSingleUnitContexts();
+    void refreshSingleUnits(const std::vector<size_t>& units);
+    bool updateSingleUnitDirectives(SlangDoc& doc);
 
     void copyOpenDocumentsFrom(const ServerDriver* oldDriver);
 

@@ -10,6 +10,7 @@
 
 #include "ast/ServerCompilation.h"
 #include "document/InlayHintCollector.h"
+#include "document/SlangDoc.h"
 #include "lsp/LspTypes.h"
 #include "util/Converters.h"
 #include "util/Logging.h"
@@ -66,8 +67,10 @@ static bool symbolsMatch(const ast::Symbol* a, const ast::Symbol* b) {
 ShallowAnalysis::ShallowAnalysis(SourceManager& sourceManager, slang::BufferID buffer,
                                  std::shared_ptr<syntax::SyntaxTree> tree, slang::Bag options,
                                  const std::vector<std::shared_ptr<syntax::SyntaxTree>>& allTrees,
-                                 const ServerCompilation* design) :
+                                 const ServerCompilation* design,
+                                 std::shared_ptr<const MacroContext> macroContext) :
     syntaxes(*tree), m_sourceManager(sourceManager), m_buffer(buffer), m_tree(tree),
+    m_macroContext(std::move(macroContext)),
     m_allTrees(allTrees), m_analysisOptions(options.getOrDefault<analysis::AnalysisOptions>()),
     m_symbolTreeVisitor(m_sourceManager), m_symbolIndexer(buffer) {
 

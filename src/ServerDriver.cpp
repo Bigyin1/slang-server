@@ -42,6 +42,8 @@
 #include "slang/driver/Driver.h"
 #include "slang/driver/SourceLoader.h"
 #include "slang/parsing/ParserMetadata.h"
+#include "slang/parsing/Lexer.h"
+#include "slang/parsing/TokenKind.h"
 #include "slang/syntax/AllSyntax.h"
 #include "slang/syntax/SyntaxTree.h"
 #include "slang/text/SourceLocation.h"
@@ -49,6 +51,47 @@
 
 namespace server {
 using namespace slang;
+
+namespace {
+
+// Compare directive text rather than the final macro table: an include or an
+// inactive conditional can change the context of later source files too.
+std::string directiveSignature(SourceBuffer buffer, SourceManager& sm) {
+    BumpAllocator alloc;
+    Diagnostics diagnostics;
+    parsing::Lexer lexer(buffer, alloc, diagnostics, sm);
+    std::string result;
+    auto source = sm.getSourceText(buffer.id);
+    for (auto token = lexer.lex(); token.kind != parsing::TokenKind::EndOfFile;
+         token = lexer.lex()) {
+        if (token.kind != parsing::TokenKind::Directive)
+            continue;
+        if (token.directiveKind() == syntax::SyntaxKind::MacroUsage)
+            continue;
+        auto start = token.location().offset();
+        auto end = start;
+        while (end < source.size()) {
+            auto newline = source.find('\n', end);
+            if (newline == std::string_view::npos) {
+                end = source.size();
+                break;
+            }
+            auto last = newline;
+            while (last > start && (source[last - 1] == '\r' || source[last - 1] == ' ' ||
+                                    source[last - 1] == '\t'))
+                --last;
+            auto continued = last > start && source[last - 1] == '\\';
+            end = newline + 1;
+            if (!continued)
+                break;
+        }
+        result.append(source.substr(start, end - start));
+        result.push_back('\0');
+    }
+    return result;
+}
+
+} // namespace
 
 bool ServerDriver::s_debugHoversEnabled =
 #ifdef SLANG_DEBUG
@@ -129,6 +172,23 @@ void ServerDriver::parseAndLoadSources(const std::vector<std::string>& buildfile
     // Create documents from syntax trees
     INFO("Creating ServerDriver with {} trees", driver.syntaxTrees.size());
     for (auto& tree : driver.syntaxTrees) {
+        if (driver.options.singleUnit == true &&
+            tree->root().kind == syntax::SyntaxKind::CompilationUnit) {
+            SingleUnit unit{.owner = URI::fromFile(sm.getFullPath(tree->getSourceBufferIds()[0])),
+                            .tree = tree};
+            for (auto buffer : tree->getSourceBufferIds()) {
+                auto uri = URI::fromFile(sm.getFullPath(buffer));
+                m_singleUnitBySource[uri].push_back(m_singleUnits.size());
+                if (!sm.getIncludedFrom(buffer).valid())
+                    unit.sources.push_back(uri);
+                m_directiveSignatures[uri] =
+                    directiveSignature(SourceBuffer{.data = sm.getSourceText(buffer), .id = buffer},
+                                       sm);
+            }
+            std::reverse(unit.sources.begin(), unit.sources.end());
+            if (!unit.sources.empty())
+                m_singleUnits.push_back(std::move(unit));
+        }
         for (auto buffer : tree->getSourceBufferIds()) {
             auto path = sm.getFullPath(buffer);
             if (!path.empty())
@@ -139,6 +199,106 @@ void ServerDriver::parseAndLoadSources(const std::vector<std::string>& buildfile
         auto doc = SlangDoc::fromTree(*this, std::move(tree));
         docs[uri] = doc;
     }
+    initializeSingleUnitContexts();
+}
+
+void ServerDriver::initializeSingleUnitContexts() {
+    std::shared_ptr<const MacroContext> primaryContext;
+    for (auto& unit : m_singleUnits) {
+        std::shared_ptr<const MacroContext> previous =
+            unit.tree->getSourceLibrary() ? primaryContext : nullptr;
+        for (const auto& uri : unit.sources) {
+            m_singleUnitContexts[uri] = previous;
+            auto buffer = sm.readSource(uri.getPath(), unit.tree->getSourceLibrary());
+            if (!buffer)
+                continue;
+            auto tree = syntax::SyntaxTree::fromBuffer(
+                *buffer, sm, options,
+                previous ? previous->tree->getDefinedMacros() : syntax::SyntaxTree::MacroList{});
+            previous = std::make_shared<MacroContext>(std::move(tree), std::move(previous));
+        }
+        if (!unit.tree->getSourceLibrary())
+            primaryContext = previous;
+        for (const auto& uri : unit.sources) {
+            if (auto it = docs.find(uri); it != docs.end())
+                it->second->setMacroContext(m_singleUnitContexts[uri]);
+        }
+        if (auto it = docs.find(unit.owner); it != docs.end())
+            it->second->setSyntaxTree(unit.tree);
+    }
+}
+
+void ServerDriver::refreshSingleUnits(const std::vector<size_t>& units) {
+    auto affected = units;
+    if (std::ranges::any_of(units, [&](size_t index) {
+            return !m_singleUnits[index].tree->getSourceLibrary();
+        })) {
+        for (size_t index = 0; index < m_singleUnits.size(); ++index) {
+            if (m_singleUnits[index].tree->getSourceLibrary())
+                affected.push_back(index);
+        }
+    }
+    std::ranges::sort(affected);
+    affected.erase(std::unique(affected.begin(), affected.end()), affected.end());
+    for (auto index : affected) {
+        auto& unit = m_singleUnits[index];
+        std::vector<SourceBuffer> buffers;
+        buffers.reserve(unit.sources.size());
+        for (const auto& uri : unit.sources) {
+            auto buffer = sm.readSource(uri.getPath(), unit.tree->getSourceLibrary());
+            if (buffer)
+                buffers.push_back(*buffer);
+        }
+        if (buffers.size() != unit.sources.size())
+            continue;
+        syntax::SyntaxTree::MacroList inherited;
+        if (unit.tree->getSourceLibrary()) {
+            for (const auto& primary : m_singleUnits) {
+                if (!primary.tree->getSourceLibrary()) {
+                    inherited = primary.tree->getDefinedMacros();
+                    break;
+                }
+            }
+        }
+        unit.tree = syntax::SyntaxTree::fromBuffers(buffers, sm, options, inherited);
+        for (auto& [_, owners] : m_singleUnitBySource)
+            std::erase(owners, index);
+        for (auto buffer : unit.tree->getSourceBufferIds()) {
+            auto uri = URI::fromFile(sm.getFullPath(buffer));
+            auto& owners = m_singleUnitBySource[uri];
+            if (std::ranges::find(owners, index) == owners.end())
+                owners.push_back(index);
+            m_directiveSignatures[uri] =
+                directiveSignature(SourceBuffer{.data = sm.getSourceText(buffer), .id = buffer}, sm);
+        }
+    }
+    std::erase_if(m_singleUnitBySource,
+                  [](const auto& entry) { return entry.second.empty(); });
+    initializeSingleUnitContexts();
+    for (auto& unit : m_singleUnits) {
+        comp->setPinnedTree(std::string(unit.owner.getPath()), unit.tree);
+        if (auto it = docs.find(unit.owner); it != docs.end())
+            it->second->setSyntaxTree(unit.tree);
+    }
+    diagClient->clear();
+    comp->refresh();
+    invalidateAnalysesAndRefreshClient();
+    publishCompilationDiagnostics();
+}
+
+bool ServerDriver::updateSingleUnitDirectives(SlangDoc& doc) {
+    auto it = m_singleUnitBySource.find(doc.getURI());
+    if (it == m_singleUnitBySource.end() || !comp)
+        return false;
+    auto current = directiveSignature(
+        SourceBuffer{.data = sm.getSourceText(doc.getBuffer()), .id = doc.getBuffer()}, sm);
+    auto& previous = m_directiveSignatures[doc.getURI()];
+    if (current == previous)
+        return false;
+    previous = std::move(current);
+    auto units = it->second;
+    refreshSingleUnits(units);
+    return true;
 }
 
 void ServerDriver::analyzeDocument(SlangDoc& doc, const lsp::RequestContext& ctx) {
@@ -161,6 +321,21 @@ void ServerDriver::analyzeDocument(SlangDoc& doc, const lsp::RequestContext& ctx
 }
 
 void ServerDriver::onDocDidSave(SlangDoc& doc) {
+    if (m_singleUnitBySource.contains(doc.getURI()) && comp) {
+        // The owning document can still hold the whole build tree. Index only
+        // declarations from the saved file, under that file's own URI.
+        for (const auto& unit : m_singleUnits) {
+            if (unit.owner == doc.getURI() && doc.getSyntaxTree() == unit.tree) {
+                doc.setSyntaxTree({});
+                break;
+            }
+        }
+        m_indexer.updateDocument(doc.getURI().getPath(), *doc.getSyntaxTree());
+        if (!updateSingleUnitDirectives(doc) && m_singleUnitContexts.contains(doc.getURI()))
+            analyzeDocument(doc);
+        return;
+    }
+
     m_indexer.updateDocument(doc.getURI().getPath(), *doc.getSyntaxTree());
 
     if (!comp) {
@@ -193,6 +368,9 @@ void ServerDriver::onDocDidSave(SlangDoc& doc) {
 void ServerDriver::publishCompilationDiagnostics(const URI* priorityUri) {
     diagEngine.setMappingsFromPragmas();
     for (const auto& entry : docs) {
+        if (m_singleUnitBySource.contains(entry.first) &&
+            !m_singleUnitContexts.contains(entry.first))
+            continue;
         entry.second->issueParseDiagnostics(diagEngine);
     }
     comp->issueDiagnosticsTo(diagEngine);
@@ -250,9 +428,12 @@ std::unique_ptr<ServerDriver> ServerDriver::createFromFileLists(
         return newDriver;
     }
 
-    newDriver->comp = std::make_unique<ServerCompilation>(std::move(buildDocuments),
-                                                          newDriver->options, newDriver->sm,
-                                                          newDriver->client);
+    std::unordered_map<std::string, std::shared_ptr<syntax::SyntaxTree>> pinnedTrees;
+    for (const auto& unit : newDriver->m_singleUnits)
+        pinnedTrees.emplace(std::string(unit.owner.getPath()), unit.tree);
+    newDriver->comp = std::make_unique<ServerCompilation>(
+        std::move(buildDocuments), newDriver->options, newDriver->sm, newDriver->client,
+        std::nullopt, std::move(pinnedTrees));
 
     newDriver->diagClient->clear();
     newDriver->copyOpenDocumentsFrom(oldDriver);
@@ -270,6 +451,9 @@ void ServerDriver::openDocument(const URI& uri, const std::string_view text) {
     }
     else if (docIter == docs.end() && m_buildSourceUris.contains(uri)) {
         doc = SlangDoc::open(*this, uri);
+        if (auto context = m_singleUnitContexts.find(uri);
+            context != m_singleUnitContexts.end())
+            doc->setMacroContext(context->second);
         if (doc->textMatches(text)) {
             matchesBuildSource = true;
             docs[uri] = doc;
@@ -283,17 +467,28 @@ void ServerDriver::openDocument(const URI& uri, const std::string_view text) {
         if (docIter != docs.end())
             WARN("Document {} text does not match, updating", uri.getPath());
         doc = SlangDoc::fromText(*this, uri, text);
+        if (auto context = m_singleUnitContexts.find(uri);
+            context != m_singleUnitContexts.end())
+            doc->setMacroContext(context->second);
         docs[uri] = doc;
     }
 
-    if (comp && matchesBuildSource) {
+    bool refreshedUnit = comp && updateSingleUnitDirectives(*doc);
+    if (refreshedUnit) {
+        if (m_singleUnitContexts.contains(uri))
+            publishInactiveRegions(*doc);
+    }
+    else if (comp && matchesBuildSource) {
         // File is already part of the compilation — compilation diags were
         // already published, so skip shallow diags. Still publish inactive regions.
         publishInactiveRegions(*doc);
     }
-    else {
+    else if (!comp || !m_singleUnitBySource.contains(uri) ||
+             m_singleUnitContexts.contains(uri)) {
         analyzeDocument(*doc);
     }
+    // An included header can be reached with different macro states. Keep its
+    // design diagnostics until a directive change refreshes the unit.
 
     // Track this as an open document
     m_openDocs.insert(uri);
@@ -306,6 +501,9 @@ std::shared_ptr<SlangDoc> ServerDriver::getDocument(const URI& uri) {
 
     auto doc = SlangDoc::open(*this, uri);
     if (doc) {
+        if (auto context = m_singleUnitContexts.find(uri);
+            context != m_singleUnitContexts.end())
+            doc->setMacroContext(context->second);
         docs[uri] = doc;
     }
     return doc;
@@ -328,7 +526,10 @@ void ServerDriver::onDocDidChange(const lsp::DidChangeTextDocumentParams& params
         ctx.info("Applied changes for {}; skipping superseded analysis", doc->getWsRelativePath());
         ctx.throwIfCancelled("before analysis");
     }
-    analyzeDocument(*doc, ctx);
+    if (!updateSingleUnitDirectives(*doc) &&
+        (!m_singleUnitBySource.contains(doc->getURI()) ||
+         m_singleUnitContexts.contains(doc->getURI())))
+        analyzeDocument(*doc, ctx);
 }
 
 void ServerDriver::closeDocument(const URI& uri) {
@@ -365,12 +566,14 @@ void ServerDriver::onWorkspaceDidChangeWatchedFiles(
     const lsp::DidChangeWatchedFilesParams& params) {
     // Collect docs that need updating after all buffers are reloaded
     std::vector<std::shared_ptr<SlangDoc>> updatedDocs;
+    std::vector<size_t> unitsToRefresh;
 
     for (const auto& change : params.changes) {
         switch (change.type) {
             case lsp::FileChangeType::Changed: {
-                // Only reload if this is an open document
-                if (m_openDocs.find(change.uri) == m_openDocs.end()) {
+                // Build members also need reloading when they are not open in the editor.
+                if (!m_openDocs.contains(change.uri) &&
+                    !m_singleUnitBySource.contains(change.uri)) {
                     continue;
                 }
 
@@ -386,6 +589,17 @@ void ServerDriver::onWorkspaceDidChangeWatchedFiles(
 
                 INFO("Reloaded document {} from disk", change.uri.getPath());
                 updatedDocs.push_back(doc);
+                if (auto it = m_singleUnitBySource.find(change.uri);
+                    it != m_singleUnitBySource.end()) {
+                    auto current = directiveSignature(
+                        SourceBuffer{.data = sm.getSourceText(doc->getBuffer()),
+                                     .id = doc->getBuffer()}, sm);
+                    if (current != m_directiveSignatures[change.uri]) {
+                        m_directiveSignatures[change.uri] = std::move(current);
+                        unitsToRefresh.insert(unitsToRefresh.end(), it->second.begin(),
+                                              it->second.end());
+                    }
+                }
                 break;
             }
             case lsp::FileChangeType::Deleted:
@@ -396,8 +610,20 @@ void ServerDriver::onWorkspaceDidChangeWatchedFiles(
         }
     }
 
-    // Update all open docs after all buffers have been reloaded
+    if (!unitsToRefresh.empty() && comp) {
+        std::ranges::sort(unitsToRefresh);
+        unitsToRefresh.erase(std::unique(unitsToRefresh.begin(), unitsToRefresh.end()),
+                             unitsToRefresh.end());
+        refreshSingleUnits(unitsToRefresh);
+    }
+
+    // Update affected documents after all buffers have been reloaded.
     for (auto& doc : updatedDocs) {
+        if (!unitsToRefresh.empty() && m_singleUnitBySource.contains(doc->getURI()))
+            continue;
+        if (m_singleUnitBySource.contains(doc->getURI()) &&
+            !m_singleUnitContexts.contains(doc->getURI()))
+            continue;
         analyzeDocument(*doc);
     }
 }

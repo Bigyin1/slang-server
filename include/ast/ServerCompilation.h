@@ -47,12 +47,16 @@ public:
     /// @param top Optional top module name (owned by this compilation)
     ServerCompilation(std::vector<std::shared_ptr<SlangDoc>> documents, Bag options,
                       SourceManager& sourceManager, lsp::LspClient& client,
-                      std::optional<std::string> top = std::nullopt);
+                      std::optional<std::string> top = std::nullopt,
+                      std::unordered_map<std::string, std::shared_ptr<slang::syntax::SyntaxTree>>
+                          pinnedTrees = {});
 
     ~ServerCompilation() = default;
 
-    /// Update the compilation based by requesting all syntax trees from the documents
+    /// Rebuild analysis from current document trees and pinned build-unit trees.
     void refresh();
+    void setPinnedTree(std::string path, std::shared_ptr<slang::syntax::SyntaxTree> tree);
+    size_t getRefreshCount() const { return m_refreshCount; }
 
     InstanceIndexer& getInstances() { return m_analysis->instances; }
 
@@ -137,6 +141,8 @@ private:
     /// The Slang documents this compilation is based on, keyed by their absolute source path so
     /// path-driven lookups (LSP URIs, symbol source locations) avoid scanning every doc.
     std::unordered_map<std::string, std::shared_ptr<SlangDoc>> m_documents;
+    std::unordered_map<std::string, std::shared_ptr<slang::syntax::SyntaxTree>> m_pinnedTrees;
+    size_t m_refreshCount = 0;
 
     /// Maps a declared module (/interface/program/class) name to the document that declares it.
     /// Lets toShallowSymbol() find the owning shallow compilation without scanning all

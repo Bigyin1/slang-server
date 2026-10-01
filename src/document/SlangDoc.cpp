@@ -47,6 +47,7 @@ std::shared_ptr<SlangDoc> SlangDoc::fromTree(ServerDriver& driver,
                                              std::shared_ptr<syntax::SyntaxTree> tree) {
     auto buffer = SourceBuffer{
         .data = driver.sm.getSourceText(tree->getSourceBufferIds()[0]),
+        .library = tree->getSourceLibrary(),
         .id = tree->getSourceBufferIds()[0],
     };
     auto uri = URI::fromFile(driver.sm.getFullPath(tree->getSourceBufferIds()[0]));
@@ -91,16 +92,33 @@ std::shared_ptr<syntax::SyntaxTree> SlangDoc::getSyntaxTree() {
     if (!m_tree) {
         // Will read the cached file data if it exists
         if (!m_sourceManager.isLatestData(m_buffer.id)) {
-            m_buffer = m_sourceManager.readSource(m_uri.getPath(), nullptr).value();
+            m_buffer = m_sourceManager.readSource(m_uri.getPath(), m_buffer.library).value();
         }
-        m_tree = syntax::SyntaxTree::fromBuffer(m_buffer, m_sourceManager, m_options);
+        m_tree = syntax::SyntaxTree::fromBuffer(
+            m_buffer, m_sourceManager, m_options,
+            m_macroContext ? m_macroContext->tree->getDefinedMacros()
+                           : syntax::SyntaxTree::MacroList{});
     }
     else if (!hasValidBuffers(m_sourceManager, m_tree)) {
         // Tree has invalid buffers, need to reparse
-        m_buffer = m_sourceManager.readSource(m_uri.getPath(), nullptr).value();
-        m_tree = syntax::SyntaxTree::fromBuffer(m_buffer, m_sourceManager, m_options);
+        m_buffer = m_sourceManager.readSource(m_uri.getPath(), m_buffer.library).value();
+        m_tree = syntax::SyntaxTree::fromBuffer(
+            m_buffer, m_sourceManager, m_options,
+            m_macroContext ? m_macroContext->tree->getDefinedMacros()
+                           : syntax::SyntaxTree::MacroList{});
     }
     return m_tree;
+}
+
+void SlangDoc::setMacroContext(std::shared_ptr<const MacroContext> context) {
+    m_macroContext = std::move(context);
+    m_tree.reset();
+    m_analysis.reset();
+}
+
+void SlangDoc::setSyntaxTree(std::shared_ptr<syntax::SyntaxTree> tree) {
+    m_tree = std::move(tree);
+    m_analysis.reset();
 }
 
 std::shared_ptr<ShallowAnalysis> SlangDoc::refreshAnalysis(const lsp::RequestContext& ctx) {
@@ -109,7 +127,7 @@ std::shared_ptr<ShallowAnalysis> SlangDoc::refreshAnalysis(const lsp::RequestCon
     auto trees = m_driver.getDependentTrees(tree);
     trees.insert(trees.begin(), tree);
     auto analysis = std::make_shared<ShallowAnalysis>(m_sourceManager, m_buffer.id, tree, m_options,
-                                                      trees, m_driver.comp.get());
+                                                      trees, m_driver.comp.get(), m_macroContext);
     auto topNames = analysis->getCompilation()->getRoot().topInstances |
                     std::views::transform([](const auto& top) { return top->name; });
     ctx.info("Analyzed {} with tops: {}", getWsRelativePath(), fmt::join(topNames, ", "));

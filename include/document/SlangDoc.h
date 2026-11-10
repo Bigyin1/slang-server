@@ -25,15 +25,16 @@
 #include "slang/text/SourceManager.h"
 #include "slang/util/Bag.h"
 
+class DocumentHandle;
+
 namespace server {
-/// Container around an open document, syntax tree, and shallow analysis. Isn't aware of any broader
-/// compilation context at the moment. Creates a syntax tree at the minimum, and an analysis if
-/// required.
+/// Per-file editor text, syntax, and shallow analysis. Shared build snapshots are owned
+/// independently by ServerDriver and provide inherited preprocessor context.
 
 using namespace slang;
 
-class DocumentHandle;
 class ServerDriver;
+class CompilationUnitState;
 
 class SlangDoc {
 private:
@@ -57,6 +58,9 @@ private:
     /// The syntax tree for this document
     std::shared_ptr<slang::syntax::SyntaxTree> m_tree;
 
+    /// Build snapshot whose macros were used to parse this local tree.
+    std::shared_ptr<slang::syntax::SyntaxTree> m_preprocessorContext;
+
     /// Document analysis for syntax and symbol analysis.
     /// Shared so that callers can hold the analysis alive even if getAnalysis() recreates it.
     std::shared_ptr<ShallowAnalysis> m_analysis;
@@ -71,12 +75,22 @@ private:
     bool m_macroOnly = false;
 
     // For testing
-    friend class DocumentHandle;
+    friend class ::DocumentHandle;
 
     std::shared_ptr<ShallowAnalysis> refreshAnalysis(const lsp::RequestContext& ctx);
 
 public:
     SlangDoc(ServerDriver& driver, URI uri, slang::SourceBuffer buffer);
+
+    /// Top-level source files of a multi-file (--single-unit) build tree, in compilation order.
+    const std::vector<std::filesystem::path>& getUnitSources() const;
+
+    /// The multi-file build tree as last parsed, without reparsing it (null for other documents).
+    std::shared_ptr<slang::syntax::SyntaxTree> getUnitTree() const;
+    CompilationUnitState* getCompilationUnit() const;
+
+    /// Explicit build-only path: refresh the shared unit, or return a single-file tree.
+    std::shared_ptr<slang::syntax::SyntaxTree> getBuildSyntaxTree();
 
     /// Macro-definition-only files use standalone analysis without include-context selection.
     bool isMacroOnly();
@@ -101,11 +115,11 @@ public:
         return m_uri.getPath().substr(m_wsRelativePathOffset);
     }
 
-    /// @brief Get the syntax tree, creating it if necessary
+    /// Get the local document tree. This never reparses a whole build unit.
     std::shared_ptr<slang::syntax::SyntaxTree> getSyntaxTree();
 
     /// @brief Check if analysis exists without creating it
-    bool hasAnalysis() const { return m_analysis != nullptr && m_analysis->hasValidBuffers(); }
+    bool hasAnalysis() const;
 
     /// @brief Get the analysis, creating it if necessary.
     /// Returns a shared_ptr so callers can hold the analysis alive independently of this document.
@@ -114,7 +128,7 @@ public:
     /// @brief Drop the cached analysis so the next getAnalysis() rebuilds it.
     /// Used when an external change (e.g. active-instance selection) means cached
     /// goto/hover results must be recomputed.
-    void invalidateAnalysis() { m_analysis.reset(); }
+    void invalidateAnalysis();
 
     ////////////////////////////////////////////////
     /// Indexed Syntax Tree Methods

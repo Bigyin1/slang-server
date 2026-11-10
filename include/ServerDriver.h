@@ -28,6 +28,7 @@
 #include "slang/util/FlatMap.h"
 namespace server {
 using namespace slang;
+class CompilationUnitState;
 
 /// @brief Manages the document handles, which include open and referenced symbols/documents.
 /// Syntax trees and options are used to build one, after flags are processed via a slang driver.
@@ -110,6 +111,15 @@ public:
 
     /// Infer include paths for this syntax tree only, then refresh its include relationships.
     std::shared_ptr<syntax::SyntaxTree> parseShallowTree(SourceBuffer buffer, Bag& documentOptions);
+
+    /// For a secondary file of a multi-file (--single-unit) build tree: the unit tree and the
+    /// macros active where the file starts in it. Empty for any other file.
+    std::pair<std::shared_ptr<syntax::SyntaxTree>,
+              std::vector<const syntax::DefineDirectiveSyntax*>>
+    getUnitMacrosBefore(const std::filesystem::path& path);
+
+    /// The build snapshot for a top-level single-unit source, without updating it.
+    CompilationUnitState* getCompilationUnit(const std::filesystem::path& path) const;
 
     /// Identifies a file's selected enclosing source and occurrence within that source.
     struct IncludeContextSelection {
@@ -242,6 +252,10 @@ private:
 
     /// Every source file covered by the build, including secondary single-unit buffers.
     flat_hash_set<URI> m_buildSourceUris;
+
+    /// Build snapshots have independent lifetimes from per-file editor trees.
+    std::vector<std::shared_ptr<CompilationUnitState>> m_units;
+    std::unordered_map<std::filesystem::path, std::shared_ptr<CompilationUnitState>> m_unitsByPath;
 
     /// Explicit include selections by canonical header path, preserved across driver reloads.
     std::unordered_map<std::filesystem::path, IncludeContextSelection> m_includeSelections;

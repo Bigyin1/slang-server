@@ -11,6 +11,7 @@
 #include "Indexer.h"
 #include "ServerDiagClient.h"
 #include "SystemTaskDocs.h"
+#include "ast/CompilationUnitState.h"
 #include "ast/ServerCompilation.h"
 #include "completions/CompletionDispatch.h"
 #include "document/SlangDoc.h"
@@ -195,9 +196,20 @@ bool ServerDriver::parseAndLoadSources(const std::vector<std::string>& buildfile
                 m_buildSourceUris.emplace(URI::fromFile(path));
         }
 
-        auto uri = URI::fromFile(sm.getFullPath(tree->getSourceBufferIds()[0]));
-        auto doc = SlangDoc::fromTree(*this, std::move(tree));
-        docs[uri] = doc;
+        auto unit = std::make_shared<CompilationUnitState>(sm, tree, options);
+        if (unit->sources().size() > 1) {
+            m_units.push_back(unit);
+            for (const auto& path : unit->sources()) {
+                m_unitsByPath.emplace(path, unit);
+                auto uri = URI::fromFile(path);
+                docs[uri] = SlangDoc::open(*this, uri);
+            }
+            tree.reset();
+        }
+        else {
+            auto uri = URI::fromFile(sm.getFullPath(tree->getSourceBufferIds()[0]));
+            docs[uri] = SlangDoc::fromTree(*this, std::move(tree));
+        }
     }
     return ok;
 }
@@ -254,8 +266,12 @@ void ServerDriver::onDocDidSave(SlangDoc& doc) {
     }
     else {
         diagClient->clear();
-        comp->refresh();
-        invalidateAnalysesAndRefreshClient();
+        if (!doc.getCompilationUnit() || !comp->hasValidBuffers()) {
+            comp->refresh();
+            for (const auto& unit : m_units)
+                m_indexer.updateIncludes(*unit->tree());
+            invalidateAnalysesAndRefreshClient();
+        }
         publishCompilationDiagnostics(&doc.getURI());
         publishInactiveRegions(doc);
     }
@@ -263,8 +279,17 @@ void ServerDriver::onDocDidSave(SlangDoc& doc) {
 
 void ServerDriver::publishCompilationDiagnostics(const URI* priorityUri) {
     diagEngine.setMappingsFromPragmas();
+    std::unordered_set<const CompilationUnitState*> seenUnits;
     for (const auto& entry : docs) {
-        entry.second->issueParseDiagnostics(diagEngine);
+        if (auto* unit = entry.second->getCompilationUnit()) {
+            if (seenUnits.insert(unit).second) {
+                for (const auto& diagnostic : unit->tree()->diagnostics())
+                    diagEngine.issue(diagnostic);
+            }
+        }
+        else {
+            entry.second->issueParseDiagnostics(diagEngine);
+        }
     }
     comp->issueDiagnosticsTo(diagEngine);
     if (priorityUri)
@@ -446,6 +471,7 @@ void ServerDriver::onWorkspaceDidChangeWatchedFiles(
     const lsp::DidChangeWatchedFilesParams& params) {
     // Collect docs that need updating after all buffers are reloaded
     std::vector<std::shared_ptr<SlangDoc>> updatedDocs;
+    std::unordered_set<std::filesystem::path> reloadedPaths;
 
     for (const auto& change : params.changes) {
         // didChange ranges refer to the editor's previous text. A disk reload here
@@ -463,9 +489,13 @@ void ServerDriver::onWorkspaceDidChangeWatchedFiles(
                         auto buffer = sm.readSource(change.uri.getPath(), nullptr);
                         if (buffer) {
                             auto result = sm.reloadBuffer(buffer->id);
-                            if (!result)
+                            if (!result) {
                                 WARN("Failed to reload {}: {}", change.uri.getPath(),
                                      result.error().message());
+                            }
+                            else {
+                                reloadedPaths.emplace(sm.getFullPath(result->id));
+                            }
                         }
                     }
                     continue;
@@ -477,6 +507,7 @@ void ServerDriver::onWorkspaceDidChangeWatchedFiles(
                 }
 
                 INFO("Reloaded document {} from disk", change.uri.getPath());
+                reloadedPaths.emplace(sm.getFullPath(doc->getBuffer()));
                 updatedDocs.push_back(doc);
                 break;
             }
@@ -486,7 +517,28 @@ void ServerDriver::onWorkspaceDidChangeWatchedFiles(
         }
     }
 
-    // Analyze only after every changed disk buffer has been reloaded.
+    bool refreshBuild = false;
+    if (comp) {
+        for (const auto& unit : m_units) {
+            for (auto buffer : unit->tree()->getSourceBufferIds()) {
+                if (reloadedPaths.contains(sm.getFullPath(buffer))) {
+                    refreshBuild = true;
+                    break;
+                }
+            }
+            if (refreshBuild)
+                break;
+        }
+        if (refreshBuild) {
+            diagClient->clear();
+            comp->refresh();
+            for (const auto& unit : m_units)
+                m_indexer.updateIncludes(*unit->tree());
+            invalidateAnalysesAndRefreshClient();
+        }
+    }
+
+    // Analyze only after every changed disk buffer and affected build context is current.
     for (auto& doc : updatedDocs) {
         analyzeDocument(*doc);
     }
@@ -494,6 +546,10 @@ void ServerDriver::onWorkspaceDidChangeWatchedFiles(
         auto it = docs.find(uri);
         if (it != docs.end() && !it->second->hasAnalysis())
             analyzeDocument(*it->second);
+    }
+    if (refreshBuild) {
+        diagClient->clear();
+        publishCompilationDiagnostics();
     }
 }
 
@@ -609,10 +665,36 @@ bool ServerDriver::setIncludeContext(const IncludeContextSelection& selection) {
     return true;
 }
 
+std::pair<std::shared_ptr<syntax::SyntaxTree>, std::vector<const syntax::DefineDirectiveSyntax*>>
+ServerDriver::getUnitMacrosBefore(const std::filesystem::path& path) {
+    auto* unit = getCompilationUnit(path);
+    if (!unit)
+        return {};
+    return {unit->tree(), unit->macrosBefore(path)};
+}
+
+CompilationUnitState* ServerDriver::getCompilationUnit(const std::filesystem::path& path) const {
+    auto it = m_unitsByPath.find(path);
+    return it == m_unitsByPath.end() ? nullptr : it->second.get();
+}
+
 std::shared_ptr<syntax::SyntaxTree> ServerDriver::parseShallowTree(SourceBuffer buffer,
                                                                    Bag& documentOptions) {
     documentOptions = options;
-    auto tree = syntax::SyntaxTree::fromBuffer(buffer, sm, documentOptions);
+    // A file that is part of a --single-unit build sees the macros active where it starts in the
+    // unit. Parsed on its own it would see none, and report false "unknown macro" errors.
+    auto [unitTree, inherited] = getUnitMacrosBefore(sm.getFullPath(buffer.id));
+    if (unitTree)
+        buffer.library = unitTree->getSourceLibrary();
+    auto tree = syntax::SyntaxTree::fromBuffer(buffer, sm, documentOptions, inherited);
+    if (unitTree) {
+        // The inherited macro syntax lives in the unit tree: keep it alive as long as this tree.
+        struct Owner {
+            std::shared_ptr<syntax::SyntaxTree> unit, tree;
+        };
+        auto owner = std::make_shared<Owner>(Owner{std::move(unitTree), tree});
+        tree = std::shared_ptr<syntax::SyntaxTree>(owner, owner->tree.get());
+    }
     if (!m_buildSourceUris.contains(URI::fromFile(sm.getFullPath(buffer.id)))) {
         const auto configured = options.getOrDefault<parsing::PreprocessorOptions>();
         auto findTarget = [&](const parsing::IncludeMetadata& include) {
@@ -720,7 +802,9 @@ std::vector<std::shared_ptr<syntax::SyntaxTree>> ServerDriver::getDependentTrees
                 return;
             // Read the enclosing source's syntax without starting an included file's analysis,
             // which could recursively discover this same dependency graph.
-            auto contexts = getIncludeContexts(*symbolLoc->uri, true);
+            auto contexts = getCompilationUnit(*symbolLoc->uri)
+                                ? std::vector<IncludeContext>{}
+                                : getIncludeContexts(*symbolLoc->uri, true);
             auto newdoc = contexts.empty() ? getDocument(URI::fromFile(*symbolLoc->uri))
                                            : contexts.front().source;
             if (newdoc) {

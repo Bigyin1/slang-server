@@ -53,6 +53,7 @@ public:
 
     /// Update the compilation based by requesting all syntax trees from the documents
     void refresh();
+    bool hasValidBuffers() const;
 
     InstanceIndexer& getInstances() { return m_analysis->instances; }
 

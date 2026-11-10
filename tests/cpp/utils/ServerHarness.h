@@ -8,6 +8,7 @@
 #include "ServerDriver.h"
 #include "SlangServer.h"
 #include "Utils.h"
+#include "ast/CompilationUnitState.h"
 #include "document/ShallowAnalysis.h"
 #include "document/SlangDoc.h"
 #include "lsp/LspTypes.h"
@@ -20,6 +21,7 @@
 #include <variant>
 #include <vector>
 
+#include "slang/parsing/Preprocessor.h"
 #include "slang/parsing/Token.h"
 
 class DocumentHandle;
@@ -176,6 +178,21 @@ public:
     lsp::uint getOffset(const lsp::Position& position) const;
     std::vector<lsp::DocumentSymbol> getSymbolTree();
     std::vector<lsp::Diagnostic> getDiagnostics();
+
+    /// Inspect the cached tree without triggering a reparse.
+    std::shared_ptr<slang::syntax::SyntaxTree> getCachedSyntaxTree() const { return doc->m_tree; }
+
+    void setBufferChangeCallback(slang::function_ref<void(slang::BufferID, bool, bool)> callback) {
+        if (auto* unit = doc->getCompilationUnit()) {
+            auto options = unit->m_options.getOrDefault<slang::parsing::PreprocessorOptions>();
+            options.bufferChangeCB = callback;
+            unit->m_options.set(options);
+            return;
+        }
+        auto options = doc->m_options.getOrDefault<slang::parsing::PreprocessorOptions>();
+        options.bufferChangeCB = callback;
+        doc->m_options.set(options);
+    }
 
     /// @brief Get the source location for an offset
     /// @param offset The byte offset in the document

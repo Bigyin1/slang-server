@@ -3,12 +3,15 @@
 
 #include "utils/GoldenTest.h"
 #include "utils/ServerHarness.h"
+#include <catch2/generators/catch_generators.hpp>
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
 
 #include "slang/diagnostics/CompilationDiags.h"
 #include "slang/diagnostics/ExpressionsDiags.h"
+#include "slang/syntax/AllSyntax.h"
+#include "slang/util/ScopeGuard.h"
 
 TEST_CASE("SingleFileDiag") {
     ServerHarness server;
@@ -438,6 +441,124 @@ TEST_CASE("RecreatingSingleUnitBuildDoesNotShallowAnalyzeOpenBuildFile") {
     server.setBuildFile("design.f");
     REQUIRE(server.getDoc(childUri));
     CHECK_FALSE(server.getDoc(childUri)->hasAnalysis());
+}
+
+TEST_CASE("SingleUnitMacroContextAfterEditAndSave", "[single-unit][issue-587]") {
+    const std::string flags = GENERATE("", "-DTEST_UNDEF", "-DTEST_REDEFINE");
+    CAPTURE(flags);
+
+    ServerHarness server("single_unit_macros");
+    auto config = server.getConfig();
+    config.build = "design.f";
+    config.flags = flags;
+    config.flagsByFile.value() = {{"issue-587", flags}};
+    REQUIRE(server.loadConfig(config));
+
+    const auto childUri = URI::fromFile(fs::current_path() / "child.sv");
+    const auto topUri = URI::fromFile(fs::current_path() / "top.sv");
+    auto checkDiagnostics = [&](std::string_view stage) {
+        INFO("stage: " << stage);
+        const auto diagnostics = server.client.getDiagnostics(childUri);
+        bool hasConversionError = false;
+        for (const auto& diagnostic : diagnostics) {
+            INFO(diagnostic.message);
+            CHECK(diagnostic.message.find("unknown macro") == std::string::npos);
+            hasConversionError |= diagnostic.message.find(
+                                      "no implicit conversion from 'logic' to 'state_t'") !=
+                                  std::string::npos;
+        }
+        CHECK(hasConversionError);
+    };
+
+    REQUIRE(server.m_driver->comp);
+    checkDiagnostics("initial compilation");
+    auto owner = server.getDoc(topUri);
+    REQUIRE(owner);
+    DocumentHandle unit(server, topUri, "");
+    auto originalUnitTree = unit.doc->getUnitTree();
+    REQUIRE(originalUnitTree);
+    REQUIRE(owner->getUnitSources().size() == 3);
+    const auto macros = originalUnitTree->getDefinedMacros();
+    auto width = std::ranges::find_if(macros, [](const auto* macro) {
+        return macro->name.valueText() == "W";
+    });
+    if (flags == "-DTEST_UNDEF") {
+        REQUIRE(width == macros.end());
+    }
+    else {
+        REQUIRE(width != macros.end());
+        CHECK(server.sourceManager().getFullPath((*width)->name.location().buffer()).filename() ==
+              (flags.empty() ? "defs.v" : "top.sv"));
+    }
+
+    // Avoid the document-symbol request in openFile(fileName), which would itself create
+    // a standalone analysis before the edit that this regression is intended to exercise.
+    std::ifstream file(fs::current_path() / "child.sv");
+    REQUIRE(file);
+    std::string text{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+    auto child = server.openFile("child.sv", text);
+    checkDiagnostics("didOpen");
+
+    child.append("// ordinary edit without preprocessor changes\n");
+    child.publishChanges();
+    checkDiagnostics("didChange");
+
+    // A secondary file's local analysis must keep using the last parsed unit.
+    auto updatedUnitTree = unit.doc->getUnitTree();
+    REQUIRE(updatedUnitTree);
+    CHECK(updatedUnitTree == originalUnitTree);
+    CHECK(updatedUnitTree->getSourceBufferIds().size() == 3);
+
+    child.save();
+    checkDiagnostics("didSave");
+    CHECK(unit.doc->getUnitTree() != updatedUnitTree);
+    CHECK(owner->getUnitSources().size() == 3);
+}
+
+TEST_CASE("SingleUnitCommentEditReparseTiming", "[single-unit][issue-587-performance]") {
+    const std::string editedFile = GENERATE("child.sv", "top.sv");
+    CAPTURE(editedFile);
+    ServerHarness server("single_unit_macros");
+    server.setBuildFile("design.f");
+    REQUIRE(server.m_driver->comp);
+    auto edited = server.openFile(editedFile);
+    DocumentHandle unit(server, URI::fromFile(fs::current_path() / "top.sv"), "");
+    REQUIRE(unit.doc);
+    REQUIRE(unit.doc->getUnitSources().size() == 3);
+
+    std::vector<std::string> processedSources;
+    auto onBufferChange = [&](slang::BufferID buffer, bool isBack, bool isSkip) {
+        if (!isBack && !isSkip)
+            processedSources.push_back(
+                server.sourceManager().getFullPath(buffer).filename().string());
+    };
+    unit.setBufferChangeCallback(onBufferChange);
+    auto resetCallback = slang::ScopeGuard([&] { unit.setBufferChangeCallback({}); });
+
+    // Observe only the owning unit's preprocessor. A standalone child parse uses
+    // the driver's options and cannot produce these callbacks.
+    const std::vector<std::string> allSources{"defs.v", "child.sv", "top.sv"};
+    for (int edit = 0; edit < 2; ++edit) {
+        CAPTURE(edit);
+        auto previousTree = unit.doc->getUnitTree();
+        REQUIRE(previousTree);
+        processedSources.clear();
+
+        edited.append("// comment-only edit\n");
+        edited.publishChanges();
+
+        // Inspect the callback results before making any request that could parse a tree.
+        CHECK(processedSources.empty());
+        auto updatedTree = unit.doc->getUnitTree();
+        REQUIRE(updatedTree);
+        CHECK(updatedTree == previousTree);
+        CHECK(updatedTree->getSourceBufferIds().size() == 3);
+
+        processedSources.clear();
+        edited.save();
+        CHECK(processedSources == allSources);
+        CHECK(unit.doc->getUnitTree() != updatedTree);
+    }
 }
 
 TEST_CASE("OpenNonBuildFileGetsShallowDiags") {

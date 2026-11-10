@@ -39,3 +39,46 @@ TEST_CASE("CompilationUnitState caches and refreshes file-boundary macros", "[si
     CHECK_FALSE(refreshed.front()->formalArguments);
     CHECK(unit.refresh() == unit.tree());
 }
+
+TEST_CASE("CompilationUnitState snapshots retain and release their source buffers",
+          "[single-unit]") {
+    slang::SourceManager sm;
+    const auto root = fs::current_path();
+    const auto usePath = root / "snapshot_use.sv";
+    auto definitions = sm.assignText((root / "snapshot_defs.sv").string(), "`define W 8\n");
+    auto use = sm.assignText(usePath.string(), "module use; logic [`W-1:0] value; endmodule\n");
+    const slang::SourceBuffer buffers[]{definitions, use};
+    auto tree = slang::syntax::SyntaxTree::fromBuffers(buffers, sm);
+    auto options = tree->options();
+    auto unit = std::make_unique<server::CompilationUnitState>(sm, std::move(tree), options);
+    auto snapshot = unit->tree();
+    const auto& macros = unit->macrosBefore(usePath);
+    REQUIRE(macros.size() == 1);
+    const auto* macro = macros.front();
+
+    const slang::BufferID ids[]{definitions.id};
+    auto handles = sm.retainBuffers(ids);
+    REQUIRE(handles.size() == 1);
+    std::weak_ptr<void> oldBuffer = handles.front();
+    handles.clear();
+
+    const std::string replacement = "`define W 16\n";
+    slang::SmallVector<char> text;
+    text.append(replacement.begin(), replacement.end());
+    text.push_back('\0');
+    sm.replaceBuffer(definitions.id, std::move(text));
+    CHECK_FALSE(oldBuffer.expired());
+    CHECK(macro->body.front().valueText() == "8");
+
+    CHECK(unit->refresh() != snapshot);
+    REQUIRE(unit->macrosBefore(usePath).size() == 1);
+    CHECK(unit->macrosBefore(usePath).front()->body.front().valueText() == "16");
+    CHECK_FALSE(oldBuffer.expired());
+    CHECK(macro->body.front().valueText() == "8");
+
+    unit.reset();
+    CHECK_FALSE(oldBuffer.expired());
+    CHECK(macro->body.front().valueText() == "8");
+    snapshot.reset();
+    CHECK(oldBuffer.expired());
+}

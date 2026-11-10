@@ -13,6 +13,23 @@
 namespace server {
 using namespace slang;
 
+namespace {
+
+std::shared_ptr<syntax::SyntaxTree> retainTreeBuffers(SourceManager& sourceManager,
+                                                      std::shared_ptr<syntax::SyntaxTree> tree) {
+    struct Snapshot {
+        std::vector<std::shared_ptr<void>> buffers;
+        std::shared_ptr<syntax::SyntaxTree> tree;
+    };
+    auto snapshot = std::make_shared<Snapshot>(
+        Snapshot{sourceManager.retainBuffers(tree->getSourceBufferIds()), tree});
+    // Macro tokens borrow their text from the source buffers. Keep that text alive even when
+    // the unit refreshes and only a local tree still references this snapshot.
+    return std::shared_ptr<syntax::SyntaxTree>(std::move(snapshot), tree.get());
+}
+
+} // namespace
+
 CompilationUnitState::CompilationUnitState(SourceManager& sourceManager,
                                            std::shared_ptr<syntax::SyntaxTree> tree, Bag options) :
     m_sourceManager(sourceManager), m_options(std::move(options)), m_tree(std::move(tree)) {
@@ -31,6 +48,8 @@ CompilationUnitState::CompilationUnitState(SourceManager& sourceManager,
     for (size_t i = 0; i < m_sources.size(); ++i)
         m_sourceIndices.emplace(m_sources[i], i);
     indexBuffers();
+    if (m_sources.size() > 1)
+        m_tree = retainTreeBuffers(m_sourceManager, std::move(m_tree));
 }
 
 void CompilationUnitState::indexBuffers() {
@@ -69,7 +88,7 @@ std::shared_ptr<syntax::SyntaxTree> CompilationUnitState::refresh() {
     }
     auto tree = syntax::SyntaxTree::fromBuffers(buffers, m_sourceManager, m_options);
     tree->isLibraryUnit = m_tree->isLibraryUnit;
-    m_tree = std::move(tree);
+    m_tree = retainTreeBuffers(m_sourceManager, std::move(tree));
     m_macroContexts.clear();
     indexBuffers();
     return m_tree;

@@ -41,9 +41,9 @@ struct SingleUnitRepo {
                           "    y = a;\n"
                           "  end\nendmodule\n");
         write("after.sv", "`undef W\n`define V(x) x\nmodule after_m; endmodule\n");
-        write("build.f", (dir / "defs.sv").string() + "\n" + (dir / "top.sv").string() + "\n" +
-                             (dir / "child.sv").string() + "\n" + (dir / "after.sv").string() +
-                             "\n");
+        std::ofstream build(dir / "build.f");
+        for (auto file : {"defs.sv", "top.sv", "child.sv", "after.sv"})
+            build << dir / file << '\n';
         write(".slang/server.json", R"({"flags": "--single-unit --top top -Wno-redef-macro"})");
     }
     ~SingleUnitRepo() { fs::remove_all(dir); }
@@ -85,6 +85,19 @@ std::unique_ptr<SingleUnitHarness> startServer(const SingleUnitRepo& repo) {
 }
 
 } // namespace
+
+TEST_CASE("SingleUnit_BuildPathsWithSpacesKeepMacroContext") {
+    SingleUnitRepo repo("paths with spaces");
+    auto server = startServer(repo);
+    CHECK(errorCount(*server, repo) == 1);
+
+    auto child = server->openFile("child.sv");
+    child.append("// edited\n");
+    child.publishChanges();
+    CHECK(errorMessages(*server, repo.uri("child.sv")).size() == 1);
+    child.save();
+    CHECK(errorCount(*server, repo) == 1);
+}
 
 TEST_CASE("SingleUnit_EditSeesMacrosActiveAtFileStart") {
     SingleUnitRepo repo("edit");

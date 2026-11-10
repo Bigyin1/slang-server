@@ -26,9 +26,13 @@ ServerCompilationAnalysis::ServerCompilationAnalysis(
     m_analysisOptions(options.getOrDefault<slang::analysis::AnalysisOptions>()) {
     std::vector<BufferID> bufferIds;
     std::unordered_set<BufferID> seenBuffers;
+    std::unordered_set<const CompilationUnitState*> seenUnits;
 
     for (auto& [_, doc] : documents) {
-        auto tree = doc->getSyntaxTree();
+        auto* unit = doc->getCompilationUnit();
+        if (unit && !seenUnits.insert(unit).second)
+            continue;
+        auto tree = doc->getBuildSyntaxTree();
         compilation.addSyntaxTree(tree);
 
         for (auto bufferId : tree->getSourceBufferIds()) {

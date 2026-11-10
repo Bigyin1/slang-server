@@ -9,12 +9,14 @@
 #include "document/SlangDoc.h"
 
 #include "ServerDriver.h"
+#include "ast/CompilationUnitState.h"
 #include "document/ShallowAnalysis.h"
 #include "lsp/RequestContext.h"
 #include "lsp/URI.h"
 #include "util/Converters.h"
 #include "util/Logging.h"
 #include "util/SlangExtensions.h"
+#include <algorithm>
 #include <filesystem>
 #include <fmt/format.h>
 #include <fmt/ranges.h>
@@ -55,7 +57,28 @@ std::shared_ptr<SlangDoc> SlangDoc::fromTree(ServerDriver& driver,
     auto uri = URI::fromFile(driver.sm.getFullPath(tree->getSourceBufferIds()[0]));
     auto ret = std::make_shared<SlangDoc>(driver, uri, buffer);
     ret->m_tree = tree;
+
     return ret;
+}
+
+CompilationUnitState* SlangDoc::getCompilationUnit() const {
+    return m_driver.getCompilationUnit(std::filesystem::path(m_uri.getPath()));
+}
+
+const std::vector<std::filesystem::path>& SlangDoc::getUnitSources() const {
+    static const std::vector<std::filesystem::path> empty;
+    auto* unit = getCompilationUnit();
+    return unit ? unit->sources() : empty;
+}
+
+std::shared_ptr<syntax::SyntaxTree> SlangDoc::getUnitTree() const {
+    auto* unit = getCompilationUnit();
+    return unit ? unit->tree() : nullptr;
+}
+
+std::shared_ptr<syntax::SyntaxTree> SlangDoc::getBuildSyntaxTree() {
+    auto* unit = getCompilationUnit();
+    return unit ? unit->refresh() : getSyntaxTree();
 }
 
 std::shared_ptr<SlangDoc> SlangDoc::fromText(ServerDriver& driver, const URI& uri,
@@ -116,7 +139,16 @@ bool SlangDoc::isMacroOnly() {
 
 std::shared_ptr<syntax::SyntaxTree> SlangDoc::getSyntaxTree() {
     const auto& path = m_sourceManager.getFullPath(m_buffer.id);
-    if (auto contexts = m_driver.getIncludeContexts(path, true); !contexts.empty()) {
+    auto* unit = getCompilationUnit();
+    if (unit && m_preprocessorContext != unit->tree()) {
+        m_tree.reset();
+        m_analysis.reset();
+        m_preprocessorContext = unit->tree();
+    }
+    // Build sources use their own local context, even if an external file includes them.
+    if (auto contexts = unit ? std::vector<ServerDriver::IncludeContext>{}
+                             : m_driver.getIncludeContexts(path, true);
+        !contexts.empty()) {
         const auto& context = contexts.front();
         auto compilation = context.source->getAnalysis()->getShallowCompilation();
         auto tree = compilation->getSyntaxTree();
@@ -150,6 +182,20 @@ std::shared_ptr<syntax::SyntaxTree> SlangDoc::getSyntaxTree() {
         m_tree = m_driver.parseShallowTree(m_buffer, m_options);
     }
     return m_tree;
+}
+
+bool SlangDoc::hasAnalysis() const {
+    auto* unit = getCompilationUnit();
+    return m_analysis && (!unit || m_preprocessorContext == unit->tree()) &&
+           m_analysis->hasValidBuffers();
+}
+
+void SlangDoc::invalidateAnalysis() {
+    m_analysis.reset();
+    if (auto* unit = getCompilationUnit(); unit && m_preprocessorContext != unit->tree()) {
+        m_tree.reset();
+        m_preprocessorContext.reset();
+    }
 }
 
 std::shared_ptr<ShallowAnalysis> SlangDoc::refreshAnalysis(const lsp::RequestContext& ctx) {

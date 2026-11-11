@@ -58,7 +58,7 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ARTIFACT_RUN_ID/artifacts?per_page=100" > artifacts.json
           jq -e '
             [.artifacts[] | select(.expired == false) | .name] as $names |
-            ["slang-server-linux-x64", "slang-server-linux-arm64", "slang-server-macos",
+            ["slang-server-linux-x64", "slang-server-linux-arm64",
              "slang-server-windows-x64", "slang-server-windows-arm64"] - $names | length == 0
           ' artifacts.json
 

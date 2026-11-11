@@ -446,6 +446,136 @@ endmodule
     CHECK(content.find("SECOND_VALUE") != std::string::npos);
 }
 
+TEST_CASE("GotoDefinition_ModuleOutsideWorkspaceInBuildFile", "[external-navigation]") {
+    ServerHarness server("external_definition_workspace");
+    server.setBuildFile(GENERATE("design.f", "single.f"));
+
+    auto use = server.openFile("top.sv");
+    auto libraryDir = findSlangRoot() / "tests/data/external_definition_library";
+
+    auto externalDefs = use.before("external_only first").getDefinitions();
+    REQUIRE(externalDefs.size() == 1);
+    CHECK(externalDefs[0].targetUri == URI::fromFile(libraryDir / "external_only.sv"));
+    CHECK(externalDefs[0].targetSelectionRange.start.line == 0);
+
+    // A same-named workspace file outside the build must not replace the selected definition.
+    auto collisionDefs = use.before("collision second").getDefinitions();
+    REQUIRE(collisionDefs.size() == 1);
+    CHECK(collisionDefs[0].targetUri == URI::fromFile(libraryDir / "collision.sv"));
+    CHECK(collisionDefs[0].targetSelectionRange.start.line == 0);
+}
+
+TEST_CASE("External build definitions survive edits saves and reopening", "[external-navigation]") {
+    ServerHarness server("external_definition_workspace");
+    server.setBuildFile(GENERATE("design.f", "single.f"));
+    auto libraryDir = findSlangRoot() / "tests/data/external_definition_library";
+    // The selected build provides these sources without adding an external index root.
+    CHECK(server.m_indexer.getFilesForSymbol("external_only").empty());
+    auto use = server.openFile("top.sv");
+    auto check = [&] {
+        for (const auto& diagnostic : use.getDiagnostics()) {
+            CAPTURE(diagnostic.message);
+            CHECK(diagnostic.severity != lsp::DiagnosticSeverity::Error);
+        }
+        for (const auto& [reference, file, line, column] :
+             {std::tuple{"external_only first", "external_only.sv", 0, 7},
+              std::tuple{"collision second", "collision.sv", 0, 7},
+              std::tuple{"external_if bus", "types.sv", 7, 10},
+              std::tuple{"external_pkg::word_t", "types.sv", 0, 8},
+              std::tuple{"word_t value", "types.sv", 1, 24},
+              std::tuple{"convert(`LIB_WIDTH)", "types.sv", 2, 30},
+              std::tuple{"`LIB_WIDTH)", "defs.svh", 0, 8},
+              std::tuple{"LIB_WIDTH\n", "defs.svh", 0, 8}}) {
+            CAPTURE(reference);
+            auto cursor = use.before(reference);
+            auto definitions = cursor.getDefinitions();
+            REQUIRE(definitions.size() == 1);
+            CHECK(definitions[0].targetUri == URI::fromFile(libraryDir / file));
+            CHECK(definitions[0].targetSelectionRange.start ==
+                  lsp::Position{.line = static_cast<lsp::uint>(line),
+                                .character = static_cast<lsp::uint>(column)});
+            REQUIRE(use.getHoverAt(cursor.m_offset));
+        }
+    };
+    check();
+    use.insert(0, "// editor change\n");
+    use.publishChanges();
+    check();
+    use.save();
+    check();
+    use.close();
+    use.open();
+    check();
+
+    auto external = server.openFile((libraryDir / "external_only.sv").string());
+    external.insert(0, "// moved declaration\n");
+    external.save();
+    auto definitions = use.before("external_only first").getDefinitions();
+    REQUIRE(definitions.size() == 1);
+    CHECK(definitions[0].targetUri == external.m_uri);
+    CHECK(definitions[0].targetSelectionRange.start.line == 1);
+}
+
+TEST_CASE("External macro definitions follow single-unit inheritance", "[external-navigation]") {
+    ServerHarness server("external_definition_workspace");
+    server.setBuildFile("single.f");
+    auto use = server.openFile("top.sv");
+    auto headerPath = findSlangRoot() / "tests/data/external_definition_library/inherited.svh";
+    auto check = [&](lsp::uint line) {
+        auto definitions = use.before("`INHERITED_WIDTH;").getDefinitions();
+        REQUIRE(definitions.size() == 1);
+        CHECK(definitions[0].targetUri == URI::fromFile(headerPath));
+        CHECK(definitions[0].targetSelectionRange.start.line == line);
+    };
+    check(0);
+    use.append("\n// reparse\n");
+    use.publishChanges();
+    check(0);
+    use.save();
+    check(0);
+    auto header = server.openFile(headerPath.string(), "`define INHERITED_WIDTH 16\n");
+    header.insert(0, "// moved macro\n");
+    header.save();
+    check(1);
+}
+
+TEST_CASE("External module navigation follows build selection", "[external-navigation]") {
+    ServerHarness server("external_definition_workspace");
+    auto libraryDir = findSlangRoot() / "tests/data/external_definition_library";
+    auto use = server.openFile("top.sv");
+    for (auto build : {"design.f", "alternate.f", "design.f"}) {
+        server.setBuildFile(build);
+        auto definitions = use.before("collision second").getDefinitions();
+        REQUIRE(definitions.size() == 1);
+        CHECK(definitions[0].targetUri ==
+              URI::fromFile(libraryDir / (std::string_view(build) == "alternate.f"
+                                              ? "alternate.sv"
+                                              : "collision.sv")));
+    }
+}
+
+TEST_CASE("External index roots provide module and macro navigation without a build",
+          "[external-navigation]") {
+    ServerHarness server("external_definition_workspace");
+    Config config;
+    config.index = {
+        Config::IndexConfig{.dirs = std::vector<std::string>{"../external_definition_library"}}};
+    REQUIRE(server.loadConfig(config, /* forceIndexing */ true));
+    CHECK_FALSE(server.m_driver->comp);
+    CHECK(server.m_indexer.getFilesForSymbol("external_only").size() == 1);
+    CHECK(server.m_indexer.getFilesForMacro("INHERITED_WIDTH").size() == 1);
+    auto use = server.openFile("explore.sv", "module explore; external_only child(); endmodule\n"
+                                             "`ifdef INHERITED_WIDTH\n`endif\n");
+    auto libraryDir = findSlangRoot() / "tests/data/external_definition_library";
+    for (const auto& [reference, file] : {std::pair{"external_only", "external_only.sv"},
+                                          std::pair{"INHERITED_WIDTH", "inherited.svh"}}) {
+        CAPTURE(reference);
+        auto definitions = use.before(reference).getDefinitions();
+        REQUIRE(definitions.size() == 1);
+        CHECK(definitions[0].targetUri == URI::fromFile(libraryDir / file));
+    }
+}
+
 TEST_CASE("GotoDefinition_SemanticDefinitionExcludesWorkspaceNamesake") {
     ServerHarness server;
 

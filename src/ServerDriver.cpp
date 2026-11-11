@@ -791,21 +791,27 @@ std::vector<std::shared_ptr<syntax::SyntaxTree>> ServerDriver::getDependentTrees
             if (name.empty() || knownNames.contains(name))
                 return;
 
-            const auto& source = sm.getFullPath(sm.getFullyExpandedLoc(token.location()).buffer());
-            auto symbolLoc = m_indexer.getNearestSymbolLoc(name, source);
-            if (!symbolLoc)
-                return;
+            // A selected build can contain sources outside the indexed workspace. Prefer the
+            // definition resolved by that build, and use the index only for other names.
+            auto filePath = comp ? comp->getPreferredSymbolPath(name) : std::nullopt;
+            if (!filePath) {
+                const auto& source = sm.getFullPath(
+                    sm.getFullyExpandedLoc(token.location()).buffer());
+                auto symbolLoc = m_indexer.getNearestSymbolLoc(name, source);
+                if (!symbolLoc)
+                    return;
+                filePath = symbolLoc->uri->string();
+            }
             knownNames.emplace(name);
             // An included file may declare this name only under different preprocessor flags.
             // Reloading it would discard that context.
-            if (processedFiles.contains(std::filesystem::weakly_canonical(*symbolLoc->uri)))
+            if (processedFiles.contains(std::filesystem::weakly_canonical(*filePath)))
                 return;
             // Read the enclosing source's syntax without starting an included file's analysis,
             // which could recursively discover this same dependency graph.
-            auto contexts = getCompilationUnit(*symbolLoc->uri)
-                                ? std::vector<IncludeContext>{}
-                                : getIncludeContexts(*symbolLoc->uri, true);
-            auto newdoc = contexts.empty() ? getDocument(URI::fromFile(*symbolLoc->uri))
+            auto contexts = getCompilationUnit(*filePath) ? std::vector<IncludeContext>{}
+                                                          : getIncludeContexts(*filePath, true);
+            auto newdoc = contexts.empty() ? getDocument(URI::fromFile(*filePath))
                                            : contexts.front().source;
             if (newdoc) {
                 auto dependencyTree = newdoc->getSyntaxTree();
@@ -826,7 +832,7 @@ std::vector<std::shared_ptr<syntax::SyntaxTree>> ServerDriver::getDependentTrees
                     treesToProcess.push(dependencyTree);
             }
             else {
-                ERROR("No doc found for {}", symbolLoc->uri->string());
+                ERROR("No doc found for {}", *filePath);
             }
         };
 
@@ -1215,22 +1221,30 @@ std::optional<DefinitionInfo> ServerDriver::getDefinitionInfoAt(const URI& uri,
             });
         };
 
-        auto nearest = m_indexer.getNearestSymbolLocs(declTok->valueText(),
-                                                      doc->getURI().getPath());
-        if (!nearest.empty()) {
+        std::vector<std::filesystem::path> paths;
+        if (auto preferredPath = comp ? comp->getPreferredSymbolPath(declTok->valueText())
+                                      : std::nullopt) {
+            paths.emplace_back(*preferredPath);
+        }
+        else {
+            for (const auto& entry :
+                 m_indexer.getNearestSymbolLocs(declTok->valueText(), doc->getURI().getPath()))
+                paths.push_back(*entry.uri);
+        }
+        if (!paths.empty()) {
             std::erase_if(symbols, [&](const auto& candidate) {
                 if (candidate.symbol->kind != ast::SymbolKind::Definition &&
                     candidate.symbol->kind != ast::SymbolKind::Package)
                     return false;
                 auto path = sm.getFullPath(
                     sm.getFullyExpandedLoc(candidate.symbol->location).buffer());
-                return std::ranges::none_of(nearest, [&](const auto& entry) {
-                    return URI::fromFile(*entry.uri) == URI::fromFile(path);
+                return std::ranges::none_of(paths, [&](const auto& candidatePath) {
+                    return URI::fromFile(candidatePath) == URI::fromFile(path);
                 });
             });
         }
-        for (const auto& entry : nearest) {
-            auto symbolDoc = getDocument(URI::fromFile(*entry.uri));
+        for (const auto& path : paths) {
+            auto symbolDoc = getDocument(URI::fromFile(path));
             if (!symbolDoc)
                 continue;
             auto symbolAnalysis = symbolDoc->getAnalysis();

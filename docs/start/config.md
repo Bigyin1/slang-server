@@ -91,6 +91,33 @@ Workspace include-directory suggestions are computed, logged, and saved only whe
 
 When Git is available, auto-configure adds ignored folders to the matching workspace `index[].excludeDirs` entries as plain directory names, such as `"output_files"` and `".Xil"`. Repeated names are saved once. Git interprets nested ignore files, wildcards, and negations during discovery; the saved names use exact comparisons during indexing. Distinct names matched by a Git wildcard, such as `output_files` and `output_files_debug`, become separate entries. Ignored folders found during the crawl are considered even if they contain only non-HDL files. If a name would hide tracked files or re-included indexed sources elsewhere, safe specific paths are retained instead. Existing specific exclusions can be compacted into names, and obsolete wildcard exclusions in the workspace config are replaced on the next run. Ignored files are removed from discovery before choosing index and include directories. New exclusions are then limited to each entry's final index roots: narrowing `.` to `fpga` omits ignored folders found only outside `fpga`. Existing configured exclusions are preserved. File-only matches and folders covered by inherited or legacy index settings are reported for manual review. The server log records matching ignore files, lines, and patterns. Submodules and external index roots are outside this check.
 
+## Navigation outside the workspace
+
+Sources in a selected `.f` build can live outside the workspace. Go to Definition and hover
+use the build's module, interface, and package definitions, including types and members in
+those packages. A same-named definition found by the workspace index does not replace the
+definition selected by the build. Switching builds updates this choice.
+
+Macros from external headers are available through `include` and the configured include
+paths. With `--single-unit`, a macro can also come from an earlier source in the file list.
+Indexing a file does not make its macros active in other compilation units.
+
+Without a selected build, add external source roots to `index` and header search paths to
+`incdirs`, for example:
+
+```json
+{
+  "index": [{"dirs": ["../shared-rtl/src"]}],
+  "incdirs": ["../shared-rtl/include"]
+}
+```
+
+External index roots supplement the workspace scan. Indexed macro definitions can also be
+offered as navigation targets when the current preprocessor context has no definition.
+The server does not discover unrelated editor workspaces automatically: their files must
+be reachable through the build, includes, or configured index roots. These paths refer to
+the filesystem on which the language server runs.
+
 ## Config Options
 
 All configuration options are optional and have sensible defaults. In VSCode, there are completions and hovers for `server.json` files. For other editors, you may be able to associate the [config schema](https://github.com/hudson-trading/slang-server/blob/main/clients/vscode/resources/config.schema.json) with these config files to get these features.

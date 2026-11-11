@@ -98,6 +98,7 @@ nav:
       - Design Choices:
           - features/design/indexing.md
           - features/design/shallow.md
+          - features/design/instance-index.md
 
 markdown_extensions:
   - tables

@@ -43,6 +43,9 @@ During shallow analysis of `consumer`, these assertions set `channel.WIDTH` to `
 
 This inference applies to interface ports without a connected instance. In a full design, the connected interface supplies the parameters and the assertions check them. `$static_assert` is a slang extension; ordinary runtime assertions do not provide these constraints.
 
+Full-design refreshes use a [compact instance index](instance-index.md) to preserve slang's
+instance caching while retaining complete hierarchy paths and exact instance counts.
+
 ## Single Unit
 
 Slang's `--single-unit` parses the files in a build as one compilation unit, allowing later files to inherit preprocessor macros from earlier files.

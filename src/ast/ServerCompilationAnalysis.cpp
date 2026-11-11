@@ -42,6 +42,9 @@ ServerCompilationAnalysis::ServerCompilationAnalysis(
 
     // reset and rebuild indexed info
     auto& root = compilation.getRoot();
+    // Let slang establish canonical bodies before indexing. Visiting every concrete body
+    // first would eagerly elaborate duplicates and defeat slang's instance cache.
+    compilation.getSemanticDiagnostics();
     instances.reset(&root);
 
     // symbol references are not indexed until cone tracing is requested

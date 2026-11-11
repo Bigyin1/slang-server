@@ -92,9 +92,6 @@ jobs:
             skip_pytests: true
             skip_neovim_tests: true
             skip_upload: true
-          - name: macos
-            preset: macos-release
-            os: macos-15
           - name: windows-x64
             preset: win64-release
             os: windows-latest

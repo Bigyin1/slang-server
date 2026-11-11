@@ -43,10 +43,11 @@ Neovim versions can use `make_client_capabilities()` from
 
 ## Server release assets
 
-The server release workflow publishes one archive per supported platform. The
-VS Code installer uses the canonical names, such as
-`slang-server-linux-x64.tar.gz`, `slang-server-macos.tar.gz`, and
-`slang-server-windows-x64.zip`.
+This fork builds and tests Linux and Windows in GitHub Actions. Server releases
+provide x64 and arm64 archives for both platforms. macOS CI jobs and release
+archives are omitted; the `macos-release` preset remains available for local builds.
+The VS Code installer uses the canonical names, such as
+`slang-server-linux-x64.tar.gz` and `slang-server-windows-x64.zip`.
 
 Releases also include `slang-server-old-linux-x64-gcc.tar.gz` and
 `slang-server-linux-arm64-clang.tar.gz` compatibility aliases for clients that

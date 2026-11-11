@@ -1,0 +1,1 @@
+`define INHERITED_WIDTH 16

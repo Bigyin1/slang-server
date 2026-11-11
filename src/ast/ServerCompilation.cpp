@@ -31,41 +31,14 @@ namespace server {
 
 namespace {
 
-// Among instances of the same module, pick the one closest to the root, breaking ties by
-// source location, then by hierarchical path. Used as a deterministic default "active"
-// instance when the user hasn't picked one.
-const slang::ast::InstanceSymbol* choosePreferredInstance(
-    const std::vector<const slang::ast::InstanceSymbol*>& instances) {
-    auto depth = [](const slang::ast::InstanceSymbol& i) {
-        auto p = i.getHierarchicalPath();
-        return std::count(p.begin(), p.end(), '.');
-    };
-    auto sortLoc = [](const slang::ast::InstanceSymbol& i) {
-        auto* syntax = i.getSyntax();
-        return syntax ? syntax->sourceRange().start() : i.location;
-    };
-
-    auto less = [&](const slang::ast::InstanceSymbol* a, const slang::ast::InstanceSymbol* b) {
-        if (auto da = depth(*a), db = depth(*b); da != db) {
-            return da < db;
-        }
-        auto la = sortLoc(*a), lb = sortLoc(*b);
-        if (la.valid() != lb.valid()) {
-            return la.valid();
-        }
-        if (la.valid() && la != lb) {
-            return la < lb;
-        }
-        return a->getHierarchicalPath() < b->getHierarchicalPath();
-    };
-
-    const slang::ast::InstanceSymbol* preferred = nullptr;
-    for (const auto* inst : instances) {
-        if (!preferred || less(inst, preferred)) {
-            preferred = inst;
-        }
-    }
-    return preferred;
+hier::QualifiedInstance qualifyOccurrence(const InstanceIndexer::Occurrence& occurrence,
+                                          const SourceManager& sourceManager) {
+    auto* syntax = occurrence.symbol->getSyntax();
+    return {.instPath = occurrence.path,
+            .instLoc =
+                toLocation(syntax ? syntax->sourceRange()
+                                  : occurrence.symbol->getDefinition().getSyntax()->sourceRange(),
+                           sourceManager)};
 }
 
 void setActiveInterfaceInstance(
@@ -495,6 +468,7 @@ void ServerCompilation::indexModuleDocs() {
 }
 
 void ServerCompilation::refresh() {
+    m_resolvedInstances.clear();
     m_analysis = std::make_shared<ServerCompilationAnalysis>(m_documents, m_options,
                                                              m_sourceManager);
     indexModuleDocs();
@@ -513,16 +487,12 @@ bool ServerCompilation::hasValidBuffers() const {
 
 std::vector<hier::InstanceSet> ServerCompilation::getScopesByModule() {
     std::vector<hier::InstanceSet> result;
-    for (auto& [_name, instances] : m_analysis->instances.moduleToInstances) {
-        if (instances.size() == 0) {
-            continue;
-        }
-
-        auto& definition = instances[0]->getDefinition();
+    for (auto& [_name, module] : m_analysis->instances.getModules()) {
+        auto& definition = module.first->getDefinition();
         auto instSet = hier::InstanceSet{
             .declName = std::string(definition.name),
             .declLoc = toLocation(definition.getSyntax()->sourceRange(), m_sourceManager),
-            .instCount = instances.size(),
+            .instCount = module.count,
         };
         if (auto activeInstance = getActiveInstanceSelection(instSet.declName)) {
             instSet.inst = std::move(*activeInstance);
@@ -532,14 +502,15 @@ std::vector<hier::InstanceSet> ServerCompilation::getScopesByModule() {
     return result;
 }
 
-const std::vector<const slang::ast::InstanceSymbol*>& ServerCompilation::getInstancesOfModule(
+std::vector<hier::QualifiedInstance> ServerCompilation::getInstancesOfModule(
     const std::string& moduleName) const {
-    static const std::vector<const slang::ast::InstanceSymbol*> empty;
-    auto it = m_analysis->instances.moduleToInstances.find(moduleName);
-    if (it == m_analysis->instances.moduleToInstances.end()) {
-        return empty;
+    const auto& instances = m_analysis->instances.getInstances(moduleName);
+    std::vector<hier::QualifiedInstance> result;
+    result.reserve(instances.size());
+    for (const auto& instance : instances) {
+        result.push_back(qualifyOccurrence(instance, m_sourceManager));
     }
-    return it->second;
+    return result;
 }
 
 std::optional<hier::QualifiedInstance> ServerCompilation::getActiveInstanceSelection(
@@ -551,25 +522,31 @@ std::optional<hier::QualifiedInstance> ServerCompilation::getActiveInstanceSelec
     return activeIt->second;
 }
 
+const slang::ast::InstanceSymbol* ServerCompilation::resolveInstance(std::string_view path) const {
+    auto [it, inserted] = m_resolvedInstances.try_emplace(std::string(path), nullptr);
+    if (inserted) {
+        auto* symbol = lookupHierSymbol(m_analysis->compilation, path);
+        it->second = symbol ? symbol->as_if<ast::InstanceSymbol>() : nullptr;
+    }
+    return it->second;
+}
+
 const slang::ast::InstanceSymbol* ServerCompilation::getActiveInstanceSymbol(
     std::string_view moduleName) const {
-    auto it = m_analysis->instances.moduleToInstances.find(std::string(moduleName));
-    if (it == m_analysis->instances.moduleToInstances.end()) {
+    auto* module = m_analysis->instances.findModule(moduleName);
+    if (!module) {
         return nullptr;
     }
 
+    auto resolve = [&](std::string_view path) -> const ast::InstanceSymbol* {
+        auto* instance = resolveInstance(path);
+        return instance && instance->getDefinition().name == moduleName ? instance : nullptr;
+    };
     if (auto activeInstance = getActiveInstanceSelection(moduleName)) {
-        for (const auto* instance : it->second) {
-            if (instance->getHierarchicalPath() == activeInstance->instPath)
-                return instance;
-        }
+        if (auto* instance = resolve(activeInstance->instPath))
+            return instance;
     }
-
-    if (!it->second.empty()) {
-        return choosePreferredInstance(it->second);
-    }
-
-    return nullptr;
+    return resolve(module->preferred.path);
 }
 
 ActiveDesignContext ServerCompilation::createActiveDesignContext(
@@ -682,8 +659,8 @@ bool ServerCompilation::setActiveInstance(const std::string& hierPath) {
 
 std::optional<hier::QualifiedInstance> ServerCompilation::getActiveInstance(
     const std::string& moduleName) {
-    auto& byModule = m_analysis->instances.moduleToInstances;
-    if (byModule.find(moduleName) == byModule.end()) {
+    auto* module = m_analysis->instances.findModule(moduleName);
+    if (!module) {
         return std::nullopt;
     }
     // Prefer the stored path verbatim, even if the latest recompile dropped the
@@ -691,32 +668,21 @@ std::optional<hier::QualifiedInstance> ServerCompilation::getActiveInstance(
     if (auto activeInstance = getActiveInstanceSelection(moduleName)) {
         return activeInstance;
     }
-    if (auto* inst = getActiveInstanceSymbol(moduleName)) {
-        return hier::toQualifiedInstance(*inst, m_sourceManager);
-    }
-    return std::nullopt;
+    return qualifyOccurrence(module->preferred, m_sourceManager);
 }
 
 void ServerCompilation::syncActiveInstances() {
     std::unordered_map<std::string, hier::QualifiedInstance> nextActiveInstances;
-    for (const auto& [moduleName, instances] : m_analysis->instances.moduleToInstances) {
-        if (instances.empty()) {
-            continue;
-        }
-
+    for (const auto& [moduleName, module] : m_analysis->instances.getModules()) {
         if (auto activeInstance = getActiveInstanceSelection(moduleName)) {
-            auto stillExists = std::ranges::any_of(instances, [&](const auto* instance) {
-                return instance->getHierarchicalPath() == activeInstance->instPath;
-            });
-            if (stillExists) {
+            if (m_analysis->instances.containsPath(moduleName, activeInstance->instPath)) {
                 nextActiveInstances[moduleName] = std::move(*activeInstance);
                 continue;
             }
         }
 
-        if (instances.size() == 1) {
-            nextActiveInstances[moduleName] = hier::toQualifiedInstance(*instances[0],
-                                                                        m_sourceManager);
+        if (module.count == 1) {
+            nextActiveInstances[moduleName] = qualifyOccurrence(module.preferred, m_sourceManager);
         }
     }
 

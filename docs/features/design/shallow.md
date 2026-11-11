@@ -55,6 +55,9 @@ Editing any source, including the last source in the unit, reparses that file an
 
 Saving updates the workspace index, reparses an affected unit once, and refreshes full-design semantics and diagnostics. A repeated save without changed build buffers reuses the existing compilation. External changes to disk-backed unit sources or included headers also refresh the build snapshot; editor-owned buffers remain under editor control.
 
+Full-design refreshes use a [compact instance index](instance-index.md) to preserve slang's
+instance caching while retaining complete hierarchy paths and exact instance counts.
+
 Until a build refresh, edits to earlier files' macros are not reflected in later files' inherited contexts. Local analysis also does not recreate the shared compilation-unit scope for declarations such as `$unit` typedefs, or all directive state such as `default_nettype` and `timescale`. A later `undefineall` cannot currently be rewound from slang's macro history. Full-design diagnostics use the complete compilation unit and are authoritative for these cases.
 
 Files outside the selected build keep standalone analysis. Explicit includes and configured defines remain useful when opening a file without its build selected.

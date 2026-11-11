@@ -249,7 +249,8 @@ static Instance toInstance(const slang::ast::InstanceSymbol& inst, const SourceM
             break;
     }
     auto children = filled ? getScopeChildren(inst.body, sm) : std::vector<HierItem_t>{};
-    bool hasChildren = filled ? !children.empty() : scopeHasVisibleChildren(inst.body);
+    const auto& probeBody = inst.getCanonicalBody() ? *inst.getCanonicalBody() : inst.body;
+    bool hasChildren = filled ? !children.empty() : scopeHasVisibleChildren(probeBody);
     return Instance{
         .kind = SlangKind::Instance,
         .instName = nameOverride,

@@ -17,6 +17,11 @@ on:
         required: false
         type: string
         default: ''
+      artifact_run_id:
+        description: 'Reuse artifacts from a successful Release dry run at the exact existing_tag commit instead of rebuilding.'
+        required: false
+        type: string
+        default: ''
       dry_run:
         description: 'Build the selected ref and prepare release artifacts without publishing or pushing changes.'
         required: false
@@ -25,10 +30,40 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
+  validate-artifacts:
+    if: inputs.artifact_run_id != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.existing_tag }}
+          fetch-depth: 0
+      - name: Verify artifact source
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.existing_tag }}
+          ARTIFACT_RUN_ID: ${{ inputs.artifact_run_id }}
+        run: |
+          [[ "$RELEASE_TAG" == v* && "$ARTIFACT_RUN_ID" =~ ^[0-9]+$ ]]
+          RELEASE_SHA=$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ARTIFACT_RUN_ID" > run.json
+          jq -e --arg sha "$RELEASE_SHA" --arg repo "$GITHUB_REPOSITORY" '
+            .status == "completed" and .conclusion == "success" and
+            .head_sha == $sha and .head_repository.full_name == $repo and
+            .event == "workflow_dispatch" and .path == ".github/workflows/release.yml"
+          ' run.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ARTIFACT_RUN_ID/artifacts?per_page=100" > artifacts.json
+          jq -e '
+            [.artifacts[] | select(.expired == false) | .name] as $names |
+            ["slang-server-linux-x64", "slang-server-linux-arm64", "slang-server-macos",
+             "slang-server-windows-x64", "slang-server-windows-arm64"] - $names | length == 0
+          ' artifacts.json
+
   create-release:
-    if: inputs.existing_tag == ''
+    if: inputs.existing_tag == '' && inputs.artifact_run_id == ''
     runs-on: ubuntu-latest
     outputs:
       tag_name: ${{ steps.create_tag.outputs.tag_name }}
@@ -118,7 +153,7 @@ jobs:
 
   build:
     needs: create-release
-    if: always() && (needs.create-release.result == 'success' || needs.create-release.result == 'skipped')
+    if: always() && inputs.artifact_run_id == '' && (needs.create-release.result == 'success' || needs.create-release.result == 'skipped')
     uses: ./.github/workflows/build.yml
     with:
       upload_artifacts: true
@@ -128,8 +163,8 @@ jobs:
       ref: ${{ inputs.existing_tag || (inputs.dry_run && github.ref) || 'main' }}
 
   add-release-assets:
-    needs: [create-release, build]
-    if: always() && needs.build.result == 'success'
+    needs: [create-release, build, validate-artifacts]
+    if: always() && (needs.build.result == 'success' || needs.validate-artifacts.result == 'success')
     runs-on: ubuntu-latest
 
     steps:
@@ -143,6 +178,8 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          run-id: ${{ inputs.artifact_run_id || github.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Prepare release assets
         id: prepare

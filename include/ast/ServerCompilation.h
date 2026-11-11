@@ -60,9 +60,8 @@ public:
     /// Get instances by module; Used for the 'instances' view. Includes declaration metadata.
     std::vector<hier::InstanceSet> getScopesByModule();
 
-    /// Get instances of a specific module
-    const std::vector<const slang::ast::InstanceSymbol*>& getInstancesOfModule(
-        const std::string& moduleName) const;
+    /// Get every concrete path and source location without elaborating duplicate bodies.
+    std::vector<hier::QualifiedInstance> getInstancesOfModule(const std::string& moduleName) const;
 
     /// Return the file path that the active compilation resolved for a symbol name, if any.
     std::optional<std::string> getPreferredSymbolPath(std::string_view name) const;
@@ -124,6 +123,9 @@ public:
     ConeResult getLoadCone(const std::string& path);
 
 private:
+    /// Resolve concrete instances on demand and reuse the result until refresh().
+    const slang::ast::InstanceSymbol* resolveInstance(std::string_view path) const;
+
     /// Return the stored active selection for a module, if any.
     std::optional<hier::QualifiedInstance> getActiveInstanceSelection(
         std::string_view moduleName) const;
@@ -162,6 +164,8 @@ private:
     /// The analysis state, rebuilt on refresh(). Shared by shallow compilations that are using it
     /// for params while we may be rebuilding a new one.
     std::shared_ptr<ServerCompilationAnalysis> m_analysis;
+
+    mutable std::unordered_map<std::string, const slang::ast::InstanceSymbol*> m_resolvedInstances;
 
     /// Active instance and generate scope selection by module name for this compilation.
     std::unordered_map<std::string, hier::QualifiedInstance> m_activeInstancesByModule;

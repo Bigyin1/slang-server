@@ -108,8 +108,8 @@ double medianMs(std::vector<double> values) {
 
 size_t instanceCount(ServerHarness& server) {
     size_t count = 0;
-    for (const auto& [_, instances] : server.m_driver->comp->getInstances().moduleToInstances)
-        count += instances.size();
+    for (const auto& [_, module] : server.m_driver->comp->getInstances().getModules())
+        count += module.count;
     return count;
 }
 

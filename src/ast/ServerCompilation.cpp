@@ -13,6 +13,7 @@
 #include "lsp/LspClient.h"
 #include "util/Converters.h"
 #include "util/Logging.h"
+#include "util/SlangExtensions.h"
 #include <algorithm>
 #include <cctype>
 #include <memory>
@@ -475,29 +476,39 @@ ServerCompilation::ServerCompilation(std::vector<std::shared_ptr<SlangDoc>> docu
     if (m_top) {
         m_options.insertOrGet<slang::ast::CompilationOptions>().topModules = {*m_top};
     }
-    indexModuleDocs();
     refresh();
 }
 
 void ServerCompilation::indexModuleDocs() {
     m_moduleToDoc.clear();
-    for (const auto& [path, doc] : m_documents) {
-        auto tree = doc->getSyntaxTree();
-        if (!tree) {
+    for (const auto* definition : m_analysis->compilation.getDefinitions()) {
+        if (definition->location == SourceLocation::NoLocation || !definition->location.valid())
             continue;
-        }
-        for (auto name : tree->getMetadata().getDeclaredSymbols()) {
-            m_moduleToDoc.emplace(std::string(name), doc);
-        }
+        auto buffer = m_sourceManager.getFullyExpandedLoc(definition->location).buffer();
+        for (auto from = m_sourceManager.getIncludedFrom(buffer); from.valid();
+             from = m_sourceManager.getIncludedFrom(buffer))
+            buffer = from.buffer();
+        auto it = m_documents.find(m_sourceManager.getFullPath(buffer).string());
+        if (it != m_documents.end())
+            m_moduleToDoc.emplace(std::string(definition->name), it->second);
     }
 }
 
 void ServerCompilation::refresh() {
     m_analysis = std::make_shared<ServerCompilationAnalysis>(m_documents, m_options,
                                                              m_sourceManager);
+    indexModuleDocs();
     m_hierarchySearchItems.clear();
     m_hierarchySearchIndexed = false;
     syncActiveInstances();
+}
+
+bool ServerCompilation::hasValidBuffers() const {
+    for (const auto& tree : m_analysis->compilation.getSyntaxTrees()) {
+        if (!server::hasValidBuffers(m_sourceManager, tree))
+            return false;
+    }
+    return true;
 }
 
 std::vector<hier::InstanceSet> ServerCompilation::getScopesByModule() {

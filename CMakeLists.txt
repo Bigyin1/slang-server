@@ -298,6 +298,7 @@ add_library(
   src/SystemTaskDocs.cpp
   src/BuiltinMethodDocs.cpp
   src/ast/ActiveDesignContext.cpp
+  src/ast/CompilationUnitState.cpp
   src/ast/ConeResult.cpp
   src/ast/ServerCompilation.cpp
   src/ast/ServerCompilationAnalysis.cpp

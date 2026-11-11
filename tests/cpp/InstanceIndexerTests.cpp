@@ -204,7 +204,7 @@ module top; branch first(), second(); endmodule
         auto* active = compilation.getActiveInstanceSymbol("leaf");
         REQUIRE(active);
         CHECK(active->getHierarchicalPath() == "top.second.g[1].child");
-        CHECK(active->body.find<slang::ast::ParameterSymbol>("W").getValue().integer() == 9);
+        CHECK(bool(active->body.find<slang::ast::ParameterSymbol>("W").getValue().integer() == 9));
         auto lenses = server.getDocCodeLens({.textDocument = {doc.m_uri}});
         REQUIRE(lenses);
         auto serialized = rfl::json::write(*lenses);

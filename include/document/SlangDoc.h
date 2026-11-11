@@ -130,6 +130,10 @@ public:
     /// goto/hover results must be recomputed.
     void invalidateAnalysis();
 
+    /// Release this document's cached analysis and its shared include compilation.
+    /// Existing analyses held by requests or other documents remain valid.
+    void releaseAnalysis();
+
     ////////////////////////////////////////////////
     /// Indexed Syntax Tree Methods
     ////////////////////////////////////////////////

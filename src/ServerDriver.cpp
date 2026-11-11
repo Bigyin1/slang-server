@@ -266,7 +266,7 @@ void ServerDriver::onDocDidSave(SlangDoc& doc) {
     }
     else {
         diagClient->clear();
-        if (!doc.getCompilationUnit() || !comp->hasValidBuffers()) {
+        if (!comp->hasValidBuffers()) {
             comp->refresh();
             for (const auto& unit : m_units)
                 m_indexer.updateIncludes(*unit->tree());
@@ -440,6 +440,13 @@ void ServerDriver::closeDocument(const URI& uri) {
 #endif
     // Remove from open docs set
     m_openDocs.erase(uri);
+    // Navigation and includes can also analyze documents that were never opened.
+    // Trim those caches at a document lifecycle boundary, rather than evicting an
+    // analysis while another part of a request may still be using its symbols.
+    for (const auto& [cachedUri, doc] : docs) {
+        if (!m_openDocs.contains(cachedUri))
+            doc->releaseAnalysis();
+    }
     if (!comp) {
         diagClient->clear(uri);
     }

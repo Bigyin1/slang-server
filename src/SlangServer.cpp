@@ -416,12 +416,7 @@ std::vector<hier::QualifiedInstance> SlangServer::getInstancesOfModule(
         m_client.showError(fmt::format("Module {} not found", moduleName));
         return {};
     }
-    std::vector<hier::QualifiedInstance> result;
-    result.reserve(instances.size());
-    for (const auto* inst : instances) {
-        result.push_back(hier::toQualifiedInstance(*inst, m_driver->sm));
-    }
-    return result;
+    return instances;
 }
 
 bool SlangServer::expandMacros(ExpandMacroArgs args) {
@@ -592,12 +587,12 @@ std::monostate SlangServer::openModuleDefinition(const std::string& moduleName) 
         ERROR("No compilation available, cannot open module definition for {}", moduleName);
         return {};
     }
-    auto instances = m_driver->comp->getInstancesOfModule(moduleName);
-    if (instances.empty()) {
+    auto* module = m_driver->comp->getInstances().findModule(moduleName);
+    if (!module) {
         WARN("openModuleDefinition: module {} has no instances", moduleName);
         return {};
     }
-    auto declLoc = toLocation(instances[0]->getDefinition().location, m_driver->sm);
+    auto declLoc = toLocation(module->first->getDefinition().location, m_driver->sm);
     if (declLoc.uri.getPath().empty()) {
         WARN("openModuleDefinition: module {} declaration has no source location", moduleName);
         return {};
@@ -1590,8 +1585,8 @@ std::optional<std::vector<lsp::CodeLens>> SlangServer::getDocCodeLens(
 
         std::vector<std::string> instancePaths;
         instancePaths.reserve(instances.size());
-        for (auto* instance : instances)
-            instancePaths.push_back(instance->getHierarchicalPath());
+        for (const auto& instance : instances)
+            instancePaths.push_back(instance.instPath);
 
         auto range = toRange(nameToken.location(), m_driver->sm, nameToken.rawText().size());
         auto title = fmt::format("{} ({})", activeInstance->getHierarchicalPath(),

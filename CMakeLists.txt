@@ -300,6 +300,7 @@ add_library(
   src/ast/ActiveDesignContext.cpp
   src/ast/CompilationUnitState.cpp
   src/ast/ConeResult.cpp
+  src/ast/InstanceIndexer.cpp
   src/ast/ServerCompilation.cpp
   src/ast/ServerCompilationAnalysis.cpp
   src/ast/ShallowCompilation.cpp

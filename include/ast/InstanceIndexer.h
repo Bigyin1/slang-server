@@ -1,6 +1,6 @@
 //------------------------------------------------------------------------------
 // InstanceIndexer.h
-// AST visitor for indexing instance symbols by definition name
+// Compact instance hierarchy with lazy expansion of concrete paths
 //
 // SPDX-FileCopyrightText: Hudson River Trading
 // SPDX-License-Identifier: MIT
@@ -8,30 +8,70 @@
 
 #pragma once
 
-#include "slang/ast/ASTVisitor.h"
-#include "slang/ast/Symbol.h"
-#include "slang/ast/symbols/CompilationUnitSymbols.h"
-#include "slang/ast/symbols/InstanceSymbols.h"
+#include <map>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <vector>
 
-struct InstanceIndexer
-    : public slang::ast::ASTVisitor<InstanceIndexer, slang::ast::VisitFlags::Symbols> {
+namespace slang::ast {
+class Symbol;
+class InstanceSymbol;
+class InstanceBodySymbol;
+} // namespace slang::ast
+
+class InstanceIndexer {
 public:
-    std::map<std::string, std::vector<const slang::ast::InstanceSymbol*>> moduleToInstances;
-    void handle(const slang::ast::InstanceSymbol& symbol) {
-        // $unit modules- unused top modules
-        if (symbol.body.flags.has(slang::ast::InstanceFlags::Uninstantiated)) {
-            return;
-        }
-        moduleToInstances[std::string{symbol.getDefinition().name}].push_back(&symbol);
-        visitDefault(symbol.body);
-    }
+    struct Occurrence {
+        // Supplies declaration / instantiation locations only. Its parent scope may belong
+        // to a different occurrence of the shared body; resolve path for semantic queries.
+        const slang::ast::InstanceSymbol* symbol = nullptr;
+        std::string path;
+    };
 
-    void reset(const slang::ast::Symbol* root) {
-        moduleToInstances.clear();
-        root->visit(*this);
-    }
+    struct ModuleInfo {
+        size_t count = 0;
+        const slang::ast::InstanceSymbol* first = nullptr;
+        Occurrence preferred;
+    };
 
-    void clear() { moduleToInstances.clear(); }
+    /// Call after slang's semantic diagnostics pass has populated canonical bodies.
+    void reset(const slang::ast::Symbol* root);
+    void clear();
+    bool empty() const { return m_modules.empty(); }
 
-    bool empty() const { return moduleToInstances.empty(); }
+    const auto& getModules() const { return m_modules; }
+    const ModuleInfo* findModule(std::string_view name) const;
+
+    /// Validate a saved selection without resolving or elaborating its concrete AST.
+    bool containsPath(std::string_view name, std::string_view path) const;
+
+    /// Enumerate all concrete paths in the original depth-first order, without elaborating
+    /// duplicate instance bodies. Only requested modules' path lists are cached.
+    const std::vector<Occurrence>& getInstances(std::string_view name) const;
+
+private:
+    struct Node;
+    struct Edge {
+        const slang::ast::InstanceSymbol* symbol;
+        std::string suffix;
+        Node* body;
+    };
+    struct Node {
+        std::vector<Edge> children;
+        size_t count = 0;
+        std::optional<std::string> preferredPrefix;
+        bool building = true;
+    };
+
+    Node* indexBody(const slang::ast::InstanceBodySymbol& body);
+    void indexChildren(Node& node, const slang::ast::Symbol& scope, std::string_view prefix);
+
+    std::vector<std::unique_ptr<Node>> m_nodes;
+    std::unordered_map<const slang::ast::InstanceBodySymbol*, Node*> m_bodies;
+    std::vector<Node*> m_postorder;
+    std::map<std::string, ModuleInfo, std::less<>> m_modules;
+    mutable std::map<std::string, std::vector<Occurrence>, std::less<>> m_paths;
 };

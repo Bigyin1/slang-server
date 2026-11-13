@@ -392,6 +392,21 @@ export class ProjectComponent
   extends ViewComponent
   implements TreeDataProvider<HierItem>, vscode.TerminalLinkProvider<InstanceLink>
 {
+  private readonly hierarchyUpdated = new vscode.EventEmitter<boolean>()
+  readonly onHierarchyUpdated = this.hierarchyUpdated.event
+
+  openInExplorer = new ViewButton(
+    { title: 'Open Hierarchy Explorer', icon: '$(list-tree)', shown: true },
+    async () => {
+      await ext.hierarchyExplorer?.open()
+    }
+  )
+  openHereInExplorer = new TreeItemButton(
+    { title: 'Open Here in Hierarchy Explorer', icon: '$(list-tree)' },
+    async (item: HierItem) => {
+      await ext.hierarchyExplorer?.open(item.getPath())
+    }
+  )
   // Top $unit, has top level(s) + packages
   unit: UnitItem | undefined = undefined
 
@@ -585,6 +600,7 @@ export class ProjectComponent
 
       this._onDidChangeTreeData.fire()
       await slang.setBuildFile('')
+      this.hierarchyUpdated.fire(true)
     }
   )
 
@@ -1697,6 +1713,14 @@ export class ProjectComponent
     revealSelection = true,
     preserveFocusedPath = true,
   }: RefreshOptions = {}) {
+    try {
+      await this.refreshHierarchyData(revealSelection, preserveFocusedPath)
+    } finally {
+      this.hierarchyUpdated.fire(!preserveFocusedPath)
+    }
+  }
+
+  private async refreshHierarchyData(revealSelection: boolean, preserveFocusedPath: boolean) {
     const previousFocusedPath = preserveFocusedPath ? this.focused?.getPath() : undefined
     const unit = await slang.getUnit()
     if (unit.length === 0) {

@@ -516,3 +516,28 @@ TEST_CASE("HierLocationRetargetsNonTopModuleAfterEdit") {
     CHECK(after->uri.getPath().ends_with("two_mods.sv"));
     CHECK(after->range.start.line == baselineLine + 2);
 }
+
+TEST_CASE("Structure search filters before limiting and matches module names",
+          "[hierarchy-explorer]") {
+    ServerHarness server;
+    std::string source = "module needle_module; endmodule\nmodule top;\n";
+    for (int i = 0; i < 150; i++)
+        source += "logic needle_" + std::to_string(i) + ";\n";
+    for (int i = 0; i < 120; i++)
+        source += "needle_module child_" + std::to_string(i) + "();\n";
+    source += "endmodule\n";
+    auto doc = server.openFile("structure_search.sv", source);
+    server.setTopLevel(std::string(doc.m_uri.getPath()));
+    auto result = server.m_driver->comp->searchHierarchy("needle", true);
+    CHECK(result.totalResults == 120);
+    CHECK(result.matches.size() == 100);
+    CHECK(std::ranges::all_of(result.matches, [](const auto& item) {
+        return item.kind == hier::SlangKind::Instance;
+    }));
+    CHECK(server.m_driver->comp->searchHierarchy("needle").totalResults == 150);
+    auto command = server.executeCommand({
+        .command = "slang.searchHierarchyStructure",
+        .arguments = std::vector<lsp::LSPAny>{rfl::to_generic(std::string("needle"))},
+    });
+    REQUIRE(command);
+}

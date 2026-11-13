@@ -94,7 +94,8 @@ public:
                                            const lsp::RequestContext& ctx = {});
 
     /// Search the elaborated hierarchy for instances, scopes, ports, parameters, and signals.
-    hier::HierarchySearchResult searchHierarchy(const std::string& query);
+    hier::HierarchySearchResult searchHierarchy(const std::string& query,
+                                                bool structureOnly = false);
 
     /// Resolve the document location for a hierarchical path on-demand.
     std::optional<lsp::Location> getHierLocation(const std::string& hierPath);

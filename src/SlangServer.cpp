@@ -122,6 +122,11 @@ lsp::InitializeResult SlangServer::getInitialize(const lsp::InitializeParams& pa
             return comp.getLoadCone(hierPath).getLocations();
         });
 
+    registerDesignCommand<std::string, hier::HierarchySearchResult>(
+        "slang.searchHierarchyStructure", [](ServerCompilation& comp, const std::string& query) {
+            return comp.searchHierarchy(query, true);
+        });
+
     // Hierarchy View (sidebar)
     registerCommand<std::string, std::vector<hier::HierItem_t>, &SlangServer::getScope>(
         "slang.getScope");

@@ -9,6 +9,7 @@ export default [
     ignores: ['out/**', 'dist/**', '**/*.d.ts', 'src/test/**', 'src/vaporview-api/**'],
   },
   eslint.configs.recommended,
+  { files: ['src/hierarchy/webview.ts'], languageOptions: { globals: globals.browser } },
   {
     files: ['src/**/*.ts'],
     languageOptions: {

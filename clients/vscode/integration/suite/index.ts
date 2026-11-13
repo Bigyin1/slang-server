@@ -19,6 +19,7 @@ interface InstancesView {
 }
 
 interface ProjectComponent {
+  refreshSlangCompilation(options?: { preserveFocusedPath?: boolean }): Promise<void>
   includeData: boolean
   includeParams: boolean
   instancesView: InstancesView
@@ -61,6 +62,11 @@ export async function run(): Promise<void> {
   const extensionApi = (await extension.activate()) as {
     project: ProjectComponent
     client: LanguageClient
+    hierarchyExplorer: {
+      open(path?: string): Promise<void>
+      refresh(reset: boolean): Promise<void>
+      data: { rows: Map<string, unknown>; children(path: string): Promise<unknown[]> }
+    }
   }
 
   const uri = vscode.Uri.joinPath(workspace.uri, 'hierarchy.sv')
@@ -233,6 +239,80 @@ export async function run(): Promise<void> {
       stateSubscription.dispose()
     }
 
+    // Inspecting the same module at another hierarchy path must not activate it.
+    const activeBefore = await originalClient.sendRequest('workspace/executeCommand', {
+      command: 'slang.getActiveInstance',
+      arguments: ['branch'],
+    })
+    await extensionApi.hierarchyExplorer.open('top.branch_array[1]')
+    assert.ok(extensionApi.hierarchyExplorer.data.rows.has('top.branch_array[1]'))
+    assert.deepEqual(
+      await originalClient.sendRequest('workspace/executeCommand', {
+        command: 'slang.getActiveInstance',
+        arguments: ['branch'],
+      }),
+      activeBefore,
+      'Explorer selection must not activate an instance'
+    )
+    await extensionApi.hierarchyExplorer.refresh(false)
+    assert.ok(extensionApi.hierarchyExplorer.data.rows.has('top.branch_array[1]'))
+
+    await originalClient.sendRequest('workspace/executeCommand', {
+      command: 'slang.setBuildFile',
+      arguments: [vscode.Uri.joinPath(workspace.uri, 'explorer.f').fsPath],
+    })
+    await project.refreshSlangCompilation({ preserveFocusedPath: false })
+    await extensionApi.hierarchyExplorer.refresh(true)
+    assert.ok(extensionApi.hierarchyExplorer.data.rows.has('explorer_a'))
+    assert.ok(extensionApi.hierarchyExplorer.data.rows.has('explorer_b'), 'multiple tops retained')
+    for (const [name, width] of [
+      ['narrow', '8'],
+      ['wide', '16'],
+    ]) {
+      await extensionApi.hierarchyExplorer.open(`explorer_a.${name}`)
+      const details = await extensionApi.hierarchyExplorer.data.children(`explorer_a.${name}`)
+      const parameter = details.find(
+        (item) => (item as { instName: string }).instName === 'WIDTH'
+      ) as { value: string }
+      assert.ok(parameter.value.includes(width), 'details use the selected instance parameters')
+    }
+    const fixture = await vscode.workspace.openTextDocument(
+      vscode.Uri.joinPath(workspace.uri, 'explorer.sv')
+    )
+    const originalFixture = fixture.getText()
+    const replaceFixture = async (content: string) => {
+      const edit = new vscode.WorkspaceEdit()
+      edit.replace(
+        fixture.uri,
+        new vscode.Range(fixture.positionAt(0), fixture.positionAt(fixture.getText().length)),
+        content
+      )
+      assert.ok(await vscode.workspace.applyEdit(edit))
+      assert.ok(await fixture.save())
+    }
+    try {
+      await extensionApi.hierarchyExplorer.open('explorer_a.wide')
+      await replaceFixture(originalFixture.replace("    explorer_cell #(.WIDTH(16)) wide('0);", ''))
+      await extensionApi.hierarchyExplorer.refresh(false)
+      assert.equal(
+        extensionApi.hierarchyExplorer.data.rows.has('explorer_a.wide'),
+        false,
+        'removed instance must not survive refresh'
+      )
+    } finally {
+      await replaceFixture(originalFixture)
+      await project.refreshSlangCompilation()
+    }
+    await extensionApi.hierarchyExplorer.open('explorer_a.external_child')
+    const externalRow = extensionApi.hierarchyExplorer.data.rows.get(
+      'explorer_a.external_child'
+    ) as { item: { declLoc: { uri: string } } }
+    assert.ok(
+      externalRow.item.declLoc.uri.endsWith('/external_definition_library/external_only.sv')
+    )
+    await vscode.commands.executeCommand('slang.project.setTopLevel', uri)
+
+    console.log('Hierarchy Explorer integration checks passed')
     const outputChannel = originalClient.outputChannel
     await vscode.commands.executeCommand('slang.restartLanguageServer')
     assert.notEqual(extensionApi.client, originalClient, 'explicit restart must replace the client')

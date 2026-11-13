@@ -8,6 +8,7 @@ const { runTests } = require('@vscode/test-electron') as {
     launchArgs: string[]
     extensionTestsEnv: Record<string, string>
     version: string
+    vscodeExecutablePath?: string
   }): Promise<number>
 }
 
@@ -33,6 +34,7 @@ async function main() {
       SLANG_SERVER_TESTS: 'YES',
     },
     version: '1.96.2',
+    vscodeExecutablePath: process.env.VSCODE_EXECUTABLE_PATH,
   })
 }
 

@@ -1,0 +1,136 @@
+:root {
+  --columns: 320px 220px 150px 260px;
+  --details: 340px;
+}
+body {
+  color: var(--vscode-editor-foreground);
+  background: var(--vscode-editor-background);
+  font-family: var(--vscode-font-family, system-ui);
+  font-size: var(--vscode-font-size);
+  margin: 0;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+header,
+nav {
+  display: flex;
+  gap: 8px;
+  padding: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+button,
+input,
+select {
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-widget-border);
+  padding: 4px 8px;
+  font: inherit;
+}
+button {
+  cursor: pointer;
+}
+button:hover,
+button[aria-pressed='true'] {
+  background: var(--vscode-list-hoverBackground);
+}
+:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+}
+#status {
+  padding: 6px 12px;
+  color: var(--vscode-descriptionForeground);
+}
+main {
+  display: grid;
+  grid-template-columns: minmax(200px, 1fr) 6px var(--details);
+  min-height: 0;
+  flex: 1;
+}
+#tree {
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+}
+.columns {
+  display: grid;
+  grid-template-columns: var(--columns);
+  min-width: max-content;
+}
+.columns > span {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  padding: 4px 8px;
+  box-sizing: border-box;
+  position: relative;
+}
+.columns i {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: col-resize;
+}
+#viewport {
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+  min-width: max-content;
+}
+#rows {
+  position: relative;
+}
+.row {
+  position: absolute;
+  height: 28px;
+  cursor: pointer;
+}
+.row:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+.row.selected {
+  background: var(--vscode-list-inactiveSelectionBackground);
+}
+.row button {
+  padding: 0 5px;
+  border: 0;
+  background: transparent;
+}
+aside {
+  overflow: auto;
+  padding: 0 10px;
+}
+h3 {
+  overflow-wrap: anywhere;
+}
+#divider {
+  background: var(--vscode-panel-border);
+  cursor: col-resize;
+}
+#actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.detail {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--vscode-panel-border);
+  overflow-wrap: anywhere;
+}
+#results {
+  max-height: 180px;
+  overflow: auto;
+  padding: 0 10px;
+}
+#results button {
+  display: block;
+  text-align: left;
+  width: 100%;
+}

@@ -32,7 +32,8 @@
   "icon": "images/icon.png",
   "main": "./dist/extension.js",
   "activationEvents": [
-    "workspaceContains:**/*.{v,sv,vh,svh}"
+    "workspaceContains:**/*.{v,sv,vh,svh}",
+    "onWebviewPanel:slang.hierarchyExplorer"
   ],
   "files": [
     "dist",
@@ -530,6 +531,21 @@
       {
         "command": "slang.updateConfig",
         "title": "Extdev: update config (package.json and CONFIG.md)"
+      },
+      {
+        "command": "slang.openHierarchyExplorer",
+        "title": "slang: Open Hierarchy Explorer",
+        "icon": "$(list-tree)"
+      },
+      {
+        "command": "slang.project.openInExplorer",
+        "title": "slang: Open Hierarchy Explorer",
+        "icon": "$(list-tree)"
+      },
+      {
+        "command": "slang.project.openHereInExplorer",
+        "title": "slang: Open Here in Hierarchy Explorer",
+        "icon": "$(list-tree)"
       }
     ],
     "viewsContainers": {
@@ -607,6 +623,11 @@
           "command": "slang.project.refreshCompilation",
           "group": "navigation",
           "when": "view == slang.project"
+        },
+        {
+          "command": "slang.project.openInExplorer",
+          "when": "view == slang.project",
+          "group": "navigation"
         }
       ],
       "view/item/context": [
@@ -629,6 +650,11 @@
           "command": "slang.project.copyHierarchyPath",
           "group": "submenu@3",
           "when": "view == slang.project"
+        },
+        {
+          "command": "slang.project.openHereInExplorer",
+          "when": "view == slang.project",
+          "group": "navigation"
         }
       ],
       "editor/title": [
@@ -693,7 +719,7 @@
     "release:latest": "pnpm publish .",
     "release:insiders": "pnpm publish . --tag=insiders",
     "release:alpha": "pnpm publish . --tag=alpha --no-git-checks",
-    "esbuild-base": "esbuild ./src/extension.ts --bundle --external:vscode --format=cjs --platform=node --outfile=dist/extension.js --main-fields=module,main",
+    "esbuild-base": "node scripts/build.mjs",
     "vscode:prepublish": "pnpm esbuild-base --minify",
     "build": "pnpm esbuild-base --sourcemap",
     "watch": "pnpm esbuild-base --sourcemap --watch",

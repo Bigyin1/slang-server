@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src {{cspSource}} 'unsafe-inline'; script-src 'nonce-{{nonce}}';"
+    />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <link rel="stylesheet" href="{{stylesheet}}" />
+  </head>
+  <body>
+    <header>
+      <button id="root">Root</button><button id="up">Parent</button
+      ><button id="refresh">Refresh</button><span id="crumbs"></span>
+    </header>
+    <div id="status" role="status"></div>
+    <nav>
+      <input id="filter" aria-label="Filter current levels" placeholder="Filter visible levels" />
+      <select id="sort" aria-label="Sort">
+        <option value="source">Source order</option>
+        <option value="name">Instance name</option>
+        <option value="module">Module name</option>
+      </select>
+      <input
+        id="search"
+        aria-label="Search entire hierarchy"
+        placeholder="Search entire hierarchy"
+      />
+    </nav>
+    <section id="results"></section>
+    <main>
+      <section id="tree">
+        <div class="columns">
+          <span>Instance</span><span>Module</span><span>Kind</span><span>Definition file</span>
+        </div>
+        <div id="viewport" tabindex="0" role="treegrid" aria-label="Design hierarchy">
+          <div id="rows"></div>
+        </div>
+      </section>
+      <div id="divider" role="separator" tabindex="0" aria-label="Resize details"></div>
+      <aside>
+        <h3 id="selected">Select a block</h3>
+        <div id="actions"></div>
+        <nav id="tabs"></nav>
+        <div id="details"></div>
+      </aside>
+    </main>
+    <script nonce="{{nonce}}" src="{{script}}"></script>
+  </body>
+</html>

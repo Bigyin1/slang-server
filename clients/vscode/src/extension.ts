@@ -1,3 +1,4 @@
+import { HierarchyExplorer } from './hierarchy/Explorer'
 // SPDX-License-Identifier: MIT
 import * as vscode from 'vscode'
 
@@ -106,6 +107,10 @@ File input is sent to stdin, and formatted output is read from stdout.',
   inactiveRegions: InactiveRegionsFeature = new InactiveRegionsFeature()
 
   // Side bar
+  openHierarchyExplorer = new CommandNode({ title: 'Open Hierarchy Explorer' }, async () => {
+    await this.hierarchyExplorer?.open()
+  })
+  hierarchyExplorer?: HierarchyExplorer
   project: ProjectComponent = new ProjectComponent()
 
   ////////////////////////////////////////////////
@@ -310,6 +315,7 @@ File input is sent to stdin, and formatted output is read from stdout.',
       this.client.onNotification(
         'slang/activeInstanceChanged',
         (params: slang.ActivateInstanceParams) => {
+          this.hierarchyExplorer?.setActive(params.hierPath)
           void this.project.onActiveInstanceChanged(params)
         }
       )
@@ -321,6 +327,7 @@ File input is sent to stdin, and formatted output is read from stdout.',
     this.context.subscriptions.push(
       this.client.onDidChangeState(
         ({ oldState, newState }: { oldState: vscodelc.State; newState: vscodelc.State }) => {
+          this.hierarchyExplorer?.connectionChanged(newState === vscodelc.State.Running)
           if (newState === vscodelc.State.Running) {
             // clangd starts or restarts after crash.
             this.client!.onNotification('slang/setConfig', (config: slang.Config) => {
@@ -618,5 +625,7 @@ export async function activate(context: vscode.ExtensionContext) {
     'eirikpre.systemverilog',
     'IMCTradingBV.svlangserver',
   ])
+  ext.hierarchyExplorer = new HierarchyExplorer(context, ext.project, () => ext.client)
+  context.subscriptions.push(ext.hierarchyExplorer)
   return ext
 }

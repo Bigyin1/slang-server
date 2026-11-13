@@ -721,7 +721,8 @@ std::vector<hier::ScopeStep> ServerCompilation::getScopes(const std::string& hie
     return result;
 }
 
-hier::HierarchySearchResult ServerCompilation::searchHierarchy(const std::string& query) {
+hier::HierarchySearchResult ServerCompilation::searchHierarchy(const std::string& query,
+                                                               bool structureOnly) {
     constexpr size_t maxResults = 100;
     hier::HierarchySearchResult result{};
 
@@ -835,6 +836,10 @@ hier::HierarchySearchResult ServerCompilation::searchHierarchy(const std::string
     };
     std::vector<Match> matches;
     for (const auto& item : m_hierarchySearchItems) {
+        if (structureOnly && item.kind != hier::SlangKind::Instance &&
+            item.kind != hier::SlangKind::InstanceArray && item.kind != hier::SlangKind::Scope &&
+            item.kind != hier::SlangKind::ScopeArray)
+            continue;
         auto lowerLabel = lowercase(item.name);
         auto lowerPath = lowercase(item.path);
         int rank;
@@ -847,6 +852,9 @@ hier::HierarchySearchResult ServerCompilation::searchHierarchy(const std::string
         else if (lowerLabel.find(lowerQuery) != std::string::npos)
             rank = 2;
         else if (lowerPath.find(lowerQuery) != std::string::npos)
+            rank = 3;
+        else if (structureOnly && item.description &&
+                 lowercase(*item.description).find(lowerQuery) != std::string::npos)
             rank = 3;
         else if (fuzzyMatches(lowerQuery, lowerPath))
             rank = 4;

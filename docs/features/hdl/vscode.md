@@ -147,3 +147,8 @@ The appearance is controlled by `slang.inactiveRegions.style`:
 
   </div>
 </div>
+
+## Hierarchy Explorer
+
+Open the [Hierarchy Explorer](../hierarchy-explorer.md) in an editor tab for a
+wide hierarchy table with filtering, search, and instance details.

@@ -55,6 +55,12 @@ public:
     /// @return Vector of LSP document links to included files
     std::vector<lsp::DocumentLink> getDocLinks() const;
 
+    /// @brief Gets the buffer included by an `include directive
+    /// @param syntax An `include directive from this document's syntax tree
+    /// @return The included buffer, or nullopt if the file was not found
+    std::optional<slang::BufferID> getIncludedBuffer(
+        const slang::syntax::IncludeDirectiveSyntax& syntax) const;
+
     /// @brief Gets hover information for a symbol at an LSP position
     /// @param position The LSP position to query
     /// @return Optional hover information, or nullopt if none available
@@ -184,6 +190,10 @@ public:
     /// Gets the type of the expression ending at a token, including call results.
     const slang::ast::Type* getExpressionTypeAtToken(const slang::parsing::Token* token) const;
 
+    /// Array-method iterators visible at this syntax, from inner to outer with expressions.
+    slang::SmallVector<const slang::ast::ValueSymbol*, 2> getArrayMethodIterators(
+        const slang::syntax::SyntaxNode& syntax) const;
+
     /// Looks up built-in methods by receiver kind and result type, retaining arrays with invalid
     /// bounds.
     const slang::ast::SystemSubroutine* getSystemMethod(const slang::ast::Type* type,
@@ -225,6 +235,10 @@ private:
     /// Keeps the syntax and symbols referenced by this file's indexes alive.
     std::shared_ptr<ShallowCompilation> m_shallowCompilation;
 
+    /// Buffers resolved for skipped includes, retained so repeated queries reuse the same target.
+    mutable slang::flat_hash_map<const slang::syntax::IncludeDirectiveSyntax*, slang::BufferID>
+        m_resolvedIncludes;
+
     /// Symbol tree visitor for /documentSymbols
     /// Currently this is relies on syntax, but we should switch it to use the shallow compilation
     /// when symbols exist
@@ -248,6 +262,11 @@ private:
     /// Cached receiver types for expressions that require binding beyond a symbol lookup.
     mutable slang::flat_hash_map<const slang::syntax::ExpressionSyntax*, const slang::ast::Type*>
         m_expressionTypes;
+
+    /// Iterator symbols recovered by binding a queried with expression and its nested calls.
+    mutable slang::flat_hash_map<const slang::syntax::ArrayOrRandomizeMethodExpressionSyntax*,
+                                 const slang::ast::ValueSymbol*>
+        m_arrayMethodIterators;
 
     const GenvarElaboration* getGenvarElaborationAtToken(const slang::parsing::Token* node) const;
 

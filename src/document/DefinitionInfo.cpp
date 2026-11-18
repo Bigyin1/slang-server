@@ -982,9 +982,10 @@ markup::Document DefinitionInfo::SystemSubroutineTarget::getHover(
     markup::Document md;
 
     auto& head = md.addParagraph();
-    head.appendBold(token.kind != parsing::TokenKind::SystemIdentifier ? "Built-in method"
-                    : isTask                                           ? "System task"
-                                                                       : "System function")
+    head.appendBold(kind == Kind::TimingCheck                            ? "System timing check"
+                    : token.kind != parsing::TokenKind::SystemIdentifier ? "Built-in method"
+                    : kind == Kind::Task                                 ? "System task"
+                                                                         : "System function")
         .appendText(" ")
         .appendCode(token.valueText());
     if (!doc->ieeeSection.empty()) {
@@ -1095,6 +1096,23 @@ std::vector<lsp::LocationLink> DefinitionInfo::MacroTarget::getDefinition(
 std::vector<lsp::LocationLink> DefinitionInfo::SystemSubroutineTarget::getDefinition(
     const SourceManager& /*sm*/) const {
     return {};
+}
+
+markup::Document DefinitionInfo::IncludeTarget::getHover(
+    const SourceManager& sm, BufferID /*docBuffer*/, const Config::HoverConfig& /*hovers*/) const {
+    markup::Document md;
+    md.addParagraph().appendHeader(sm.getFullPath(buffer).filename().string(), 3);
+    md.addParagraph().appendText(displayPath);
+    return md;
+}
+
+std::vector<lsp::LocationLink> DefinitionInfo::IncludeTarget::getDefinition(
+    const SourceManager& sm) const {
+    return {lsp::LocationLink{
+        .targetUri = URI::fromFile(sm.getFullPath(buffer)),
+        .targetRange = {},
+        .targetSelectionRange = {},
+    }};
 }
 
 lsp::MarkupContent DefinitionInfo::getHover(BufferID docBuffer,

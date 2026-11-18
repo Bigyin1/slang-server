@@ -1017,6 +1017,21 @@ std::optional<DefinitionInfo> ServerDriver::getDefinitionInfoAt(const URI& uri,
     if (!loc) {
         return {};
     }
+
+    // Anywhere on `include "file.svh", the gap between the two tokens included
+    const syntax::SyntaxNode* atSyntax = analysis->syntaxes.getSyntaxAt(loc.value());
+    const bool isIncludeRef = atSyntax && atSyntax->kind == syntax::SyntaxKind::IncludeDirective;
+    if (isIncludeRef) {
+        auto& include = atSyntax->as<syntax::IncludeDirectiveSyntax>();
+        auto buffer = analysis->getIncludedBuffer(include);
+        if (!buffer)
+            return {};
+        auto path = sm.getFullPath(*buffer).string();
+        path.erase(0, getWsRelativePathOffset(path));
+        return DefinitionInfo{sm, DefinitionInfo::IncludeTarget{include.fileName, *buffer,
+                                                                std::move(path)}};
+    }
+
     const parsing::Token* declTok = analysis->syntaxes.getWordTokenAt(loc.value());
     if (!declTok) {
         auto* token = analysis->syntaxes.getTokenAt(*loc);
@@ -1058,6 +1073,15 @@ std::optional<DefinitionInfo> ServerDriver::getDefinitionInfoAt(const URI& uri,
         return getMacroDefinitionInfo(*analysis, *declTok, *declSyntax);
 
     if (declTok->kind == parsing::TokenKind::SystemIdentifier) {
+        using Kind = DefinitionInfo::SystemSubroutineTarget::Kind;
+        if (declSyntax->kind == syntax::SyntaxKind::SystemTimingCheck) {
+            for (const auto& [name, doc] : getSystemTimingCheckDocs()) {
+                if (declTok->valueText() == name)
+                    return DefinitionInfo{sm, DefinitionInfo::SystemSubroutineTarget{
+                                                  *declTok, &doc, Kind::TimingCheck}};
+            }
+            return {};
+        }
         auto knownName = declTok->systemName();
         if (knownName == parsing::KnownSystemName::Unknown)
             return {};
@@ -1068,7 +1092,9 @@ std::optional<DefinitionInfo> ServerDriver::getDefinitionInfoAt(const URI& uri,
             return {};
 
         return DefinitionInfo{sm, DefinitionInfo::SystemSubroutineTarget{
-                                      *declTok, sysDoc, sub->kind == ast::SubroutineKind::Task}};
+                                      *declTok, sysDoc,
+                                      sub->kind == ast::SubroutineKind::Task ? Kind::Task
+                                                                             : Kind::Function}};
     }
     auto symbolsEquivalent = [&](const ast::Symbol* left, const ast::Symbol* right) {
         if (left == right)
@@ -1141,9 +1167,12 @@ std::optional<DefinitionInfo> ServerDriver::getDefinitionInfoAt(const URI& uri,
                                                      declTok->valueText());
             auto* methodDoc = method ? getSystemTaskDoc(method->knownNameId) : nullptr;
             if (methodDoc) {
+                using Kind = DefinitionInfo::SystemSubroutineTarget::Kind;
                 return DefinitionInfo{sm, DefinitionInfo::SystemSubroutineTarget{
                                               *declTok, methodDoc,
-                                              method->kind == ast::SubroutineKind::Task}};
+                                              method->kind == ast::SubroutineKind::Task
+                                                  ? Kind::Task
+                                                  : Kind::Function}};
             }
         }
     }
@@ -1269,7 +1298,8 @@ std::optional<DefinitionInfo> ServerDriver::getDefinitionInfoAt(const URI& uri,
     }
 
     auto makeSyntaxTarget =
-        [&](const ast::Symbol* symbol) -> std::optional<DefinitionInfo::SyntaxTarget> {
+        [&](const ast::Symbol* symbol,
+            const ShallowAnalysis& symbolAnalysis) -> std::optional<DefinitionInfo::SyntaxTarget> {
         auto* symSyntax = symbol->getSyntax();
         if (!symSyntax) {
             if (auto* typeParam = symbol->as_if<ast::TypeParameterSymbol>())
@@ -1279,6 +1309,11 @@ std::optional<DefinitionInfo> ServerDriver::getDefinitionInfoAt(const URI& uri,
                 if (subroutine && subroutine->returnValVar == symbol)
                     symSyntax = subroutine->getSyntax();
             }
+        }
+        if (!symSyntax && symbol->kind == ast::SymbolKind::Iterator) {
+            auto* token = symbolAnalysis.syntaxes.getWordTokenAt(symbol->location);
+            if (token && token->valueText() == symbol->name)
+                symSyntax = symbolAnalysis.syntaxes.getTokenParent(token);
         }
         if (!symSyntax) {
             if (symbol->location != SourceLocation::NoLocation)
@@ -1314,7 +1349,7 @@ std::optional<DefinitionInfo> ServerDriver::getDefinitionInfoAt(const URI& uri,
             bool renderInterfaceConnection = true) -> std::optional<DefinitionInfo::SymbolTarget> {
         if (!symbol)
             return {};
-        auto syntaxTarget = makeSyntaxTarget(symbol);
+        auto syntaxTarget = makeSyntaxTarget(symbol, *symbolAnalysis);
         if (!syntaxTarget && symbol->location != SourceLocation::NoLocation)
             return {};
 
@@ -1323,7 +1358,8 @@ std::optional<DefinitionInfo> ServerDriver::getDefinitionInfoAt(const URI& uri,
             syntaxes.push_back(std::move(*syntaxTarget));
         if (auto* modportPort = symbol->as_if<ast::ModportPortSymbol>()) {
             if (modportPort->internalSymbol) {
-                if (auto internalSyntax = makeSyntaxTarget(modportPort->internalSymbol))
+                if (auto internalSyntax = makeSyntaxTarget(modportPort->internalSymbol,
+                                                           *symbolAnalysis))
                     syntaxes.push_back(std::move(*internalSyntax));
             }
         }

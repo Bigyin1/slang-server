@@ -47,6 +47,7 @@
 #include "slang/parsing/ParserMetadata.h"
 #include "slang/syntax/AllSyntax.h"
 #include "slang/syntax/SyntaxTree.h"
+#include "slang/syntax/SyntaxVisitor.h"
 #include "slang/text/SourceLocation.h"
 #include "slang/text/SourceManager.h"
 
@@ -220,13 +221,24 @@ void ServerDriver::analyzeDocument(SlangDoc& doc, const lsp::RequestContext& ctx
     // Clear and re-issue diagnostics for this document
     diagClient->clear(doc.getURI());
 
-    // Pragma mappings are populated from the preprocessor/lexer
-    doc.getSyntaxTree();
-
-    // Update pragma mappings for the changed buffer
-    diagEngine.setMappingsFromPragmas(doc.getBuffer());
-
-    doc.issueDiagnosticsTo(diagEngine, ctx);
+    try {
+        if (auto message = doc.getAnalysisLimitMessage())
+            throw lsp::RequestFailed(*message);
+        // Pragma mappings are populated from the preprocessor/lexer.
+        doc.getSyntaxTree();
+        diagEngine.setMappingsFromPragmas(doc.getBuffer());
+        doc.issueDiagnosticsTo(diagEngine, ctx);
+    }
+    catch (const lsp::RequestFailed& error) {
+        diagClient->clear(doc.getURI());
+        diagClient->pushDiags(doc.getURI());
+        if (isDocumentOpen(doc.getURI()) && m_analysisLimitNotified.insert(doc.getURI()).second)
+            client.showWarning(error.what());
+        if (client.capabilities.inactiveRegionsSupported)
+            client.onTextDocumentInactiveRegions({.uri = doc.getURI(), .regions = {}});
+        return;
+    }
+    m_analysisLimitNotified.erase(doc.getURI());
     ctx.throwIfCancelled("before publishing diagnostics");
     diagClient->pushDiags(doc.getURI());
 
@@ -234,6 +246,10 @@ void ServerDriver::analyzeDocument(SlangDoc& doc, const lsp::RequestContext& ctx
 }
 
 void ServerDriver::onDocDidSave(SlangDoc& doc) {
+    if (doc.getAnalysisLimitMessage()) {
+        analyzeDocument(doc);
+        return;
+    }
     auto tree = doc.getSyntaxTree();
     if (sm.getFullPath(tree->getSourceBufferIds()[0]) != sm.getFullPath(doc.getBuffer())) {
         auto indexOptions = options;
@@ -280,18 +296,24 @@ void ServerDriver::onDocDidSave(SlangDoc& doc) {
 void ServerDriver::publishCompilationDiagnostics(const URI* priorityUri) {
     diagEngine.setMappingsFromPragmas();
     std::unordered_set<const CompilationUnitState*> seenUnits;
-    for (const auto& entry : docs) {
-        if (auto* unit = entry.second->getCompilationUnit()) {
+    for (const auto& [uri, doc] : docs) {
+        if (doc->getAnalysisLimitMessage())
+            continue;
+        if (auto* unit = doc->getCompilationUnit()) {
             if (seenUnits.insert(unit).second) {
                 for (const auto& diagnostic : unit->tree()->diagnostics())
                     diagEngine.issue(diagnostic);
             }
         }
         else {
-            entry.second->issueParseDiagnostics(diagEngine);
+            doc->issueParseDiagnostics(diagEngine);
         }
     }
     comp->issueDiagnosticsTo(diagEngine);
+    for (const auto& [uri, doc] : docs) {
+        if (doc->getAnalysisLimitMessage())
+            diagClient->clear(uri);
+    }
     if (priorityUri)
         diagClient->pushDiags(*priorityUri);
     else
@@ -303,6 +325,8 @@ void ServerDriver::copyOpenDocumentsFrom(const ServerDriver* oldDriver) {
         return;
 
     m_includeSelections = oldDriver->m_includeSelections;
+    if (getMaxFileSize() == oldDriver->getMaxFileSize())
+        m_analysisLimitNotified = oldDriver->m_analysisLimitNotified;
     completions.resolveEdits = oldDriver->completions.resolveEdits;
     oldDriver->diagClient->clearAndPush();
     for (const auto& uri : oldDriver->m_openDocs) {
@@ -389,7 +413,9 @@ void ServerDriver::openDocument(const URI& uri, const std::string_view text) {
         docs[uri] = doc;
     }
 
-    if (comp && matchesBuildSource) {
+    m_openDocs.insert(uri);
+    if (comp && matchesBuildSource && !doc->getAnalysisLimitMessage()) {
+        m_analysisLimitNotified.erase(uri);
         // File is already part of the compilation — compilation diags were
         // already published, so skip shallow diags. Still publish inactive regions.
         publishInactiveRegions(*doc);
@@ -397,9 +423,6 @@ void ServerDriver::openDocument(const URI& uri, const std::string_view text) {
     else {
         analyzeDocument(*doc);
     }
-
-    // Track this as an open document
-    m_openDocs.insert(uri);
 }
 
 std::shared_ptr<SlangDoc> ServerDriver::getDocument(const URI& uri) {
@@ -440,6 +463,7 @@ void ServerDriver::closeDocument(const URI& uri) {
 #endif
     // Remove from open docs set
     m_openDocs.erase(uri);
+    m_analysisLimitNotified.erase(uri);
     if (!comp) {
         diagClient->clear(uri);
     }
@@ -619,7 +643,7 @@ std::vector<ServerDriver::IncludeContext> ServerDriver::getIncludeContexts(
         if (!sm.isCached(source) && !std::filesystem::is_regular_file(source, ec))
             continue;
         auto doc = getDocument(URI::fromFile(source));
-        if (!doc)
+        if (!doc || doc->getAnalysisLimitMessage())
             continue;
         auto tree = doc->getSyntaxTree();
         size_t occurrence = 0;
@@ -836,23 +860,7 @@ std::vector<std::shared_ptr<syntax::SyntaxTree>> ServerDriver::getDependentTrees
             }
         };
 
-        // Keep each reference's location so dependencies in included files use their own directory.
-        for (auto instance : meta.globalInstances)
-            loadDependency(instance->type);
-        for (auto name : meta.classPackageNames)
-            loadDependency(name->identifier);
-        for (auto import : meta.packageImports) {
-            for (auto item : import->items)
-                loadDependency(item->package);
-        }
-        for (auto type : meta.virtualInterfaceTypes)
-            loadDependency(type->name);
-        if (!fullHierarchy) {
-            for (auto port : meta.interfacePorts)
-                loadDependency(port->nameOrKeyword);
-            for (auto type : meta.namedPortTypes)
-                loadDependency(type->identifier);
-        }
+        meta.visitReferencedSymbols(loadDependency, /* includePortNames */ !fullHierarchy);
     }
 
     return result;
@@ -868,6 +876,8 @@ std::vector<std::string> ServerDriver::getModulesInFile(const std::string& path)
     }
 
     auto& doc = it->second;
+    if (auto message = doc->getAnalysisLimitMessage())
+        throw lsp::RequestFailed(*message);
 
     // Get the module-like things from the document and collect into a vector
     std::vector<std::string> moduleNames;
@@ -1555,8 +1565,11 @@ void ServerDriver::addMemberReferences(std::vector<lsp::Location>& references,
         if (!isTypeMember && parentSymbol.kind == ast::SymbolKind::Package) {
             auto& meta = fileDoc->getSyntaxTree()->getMetadata();
             bool hasWildcard = [&] {
-                for (auto ref : meta.packageImports) {
-                    for (auto item : ref->items) {
+                for (auto ref : meta.refs) {
+                    auto import = ref->as_if<syntax::PackageImportDeclarationSyntax>();
+                    if (!import)
+                        continue;
+                    for (auto item : import->items) {
                         if (item->package.valueText() == parentSymbol.name &&
                             item->item.kind == parsing::TokenKind::Star) {
                             return true;
@@ -1567,11 +1580,12 @@ void ServerDriver::addMemberReferences(std::vector<lsp::Location>& references,
             }();
             if (!hasWildcard) {
                 // no wildcard, just check cases of pkg::<targetName>
-                for (auto ref : meta.classPackageNames) {
-                    if (ref->identifier.valueText() != parentSymbol.name) {
+                for (auto ref : meta.refs) {
+                    auto name = ref->as_if<syntax::IdentifierNameSyntax>();
+                    if (!name || name->identifier.valueText() != parentSymbol.name) {
                         continue;
                     }
-                    auto tok = ref->parent->as<syntax::ScopedNameSyntax>().right->getFirstToken();
+                    auto tok = name->parent->as<syntax::ScopedNameSyntax>().right->getFirstToken();
                     if (tok.valueText() == targetName) {
                         references.push_back(toOriginalLocation(tok.range(), sm));
                     }
@@ -1675,37 +1689,44 @@ std::optional<std::vector<lsp::Location>> ServerDriver::getDocReferences(
     auto targetName = declTok->rawText();
 
     auto findPkgReferencesInDocument = [&](const parsing::ParserMetadata& meta, const URI&) {
-        for (auto ref : meta.packageImports) {
-            for (auto item : ref->items) {
-                if (item->package.valueText() == targetName) {
-                    references.push_back(toOriginalLocation(item->package.range(), sm));
+        for (auto ref : meta.refs) {
+            if (auto import = ref->as_if<syntax::PackageImportDeclarationSyntax>()) {
+                for (auto item : import->items) {
+                    if (item->package.valueText() == targetName) {
+                        references.push_back(toOriginalLocation(item->package.range(), sm));
+                    }
                 }
             }
-        }
-        for (auto ref : meta.classPackageNames) {
-            if (ref->identifier.valueText() == targetName) {
-                references.push_back(toOriginalLocation(ref->identifier.range(), sm));
+            else if (auto name = ref->as_if<syntax::IdentifierNameSyntax>()) {
+                if (name->identifier.valueText() == targetName) {
+                    references.push_back(toOriginalLocation(name->identifier.range(), sm));
+                }
             }
         }
     };
 
     auto findModuleReferencesInDocument = [&](const parsing::ParserMetadata& meta, const URI&) {
-        for (auto inst : meta.globalInstances) {
-            if (inst->type.valueText() == targetName) {
+        for (auto ref : meta.refs) {
+            auto inst = ref->as_if<syntax::HierarchyInstantiationSyntax>();
+            if (inst && inst->type.valueText() == targetName) {
                 references.push_back(toOriginalLocation(inst->type.range(), sm));
             }
         }
     };
 
-    auto findInterfaceReferencesInDocument = [&](const parsing::ParserMetadata& meta, const URI&) {
-        for (auto inst : meta.globalInstances) {
-            if (inst->type.valueText() == targetName) {
-                references.push_back(toOriginalLocation(inst->type.range(), sm));
-            }
-        }
-        for (auto intf : meta.interfacePorts) {
-            if (intf->nameOrKeyword.valueText() == targetName) {
-                references.push_back(toOriginalLocation(intf->nameOrKeyword.range(), sm));
+    auto findInterfaceReferencesInDocument = [&](const parsing::ParserMetadata& meta,
+                                                 const URI& uri) {
+        findModuleReferencesInDocument(meta, uri);
+        auto portVisitor = syntax::makeSyntaxVisitor(
+            [&](auto&, const syntax::InterfacePortHeaderSyntax& port) {
+                if (port.nameOrKeyword.valueText() == targetName)
+                    references.push_back(toOriginalLocation(port.nameOrKeyword.range(), sm));
+            });
+        for (const auto& [decl, _] : meta.nodeMeta) {
+            decl->header->visit(portVisitor);
+            for (auto member : decl->members) {
+                if (auto port = member->as_if<syntax::PortDeclarationSyntax>())
+                    port->header->visit(portVisitor);
             }
         }
     };

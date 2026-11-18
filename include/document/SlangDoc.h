@@ -68,7 +68,7 @@ private:
     /// Compilation shared with the includer, used to detect context replacement.
     std::shared_ptr<ShallowCompilation> m_includeCompilation;
 
-    /// Latest standalone buffer checked for a file containing only macro definitions.
+    /// Standalone buffer whose source-data version was checked for macro-only contents.
     slang::BufferID m_macroOnlyBuffer;
 
     /// Whether the checked buffer defines macros without declarations or includes.
@@ -94,6 +94,9 @@ public:
 
     /// Macro-definition-only files use standalone analysis without include-context selection.
     bool isMacroOnly();
+
+    /// Explain why the current document exceeds the configured analysis limit, if any.
+    std::optional<std::string> getAnalysisLimitMessage();
 
     // Open a Document from a syntax tree (parsed from slang Driver)
     static std::shared_ptr<SlangDoc> fromTree(ServerDriver& driver,

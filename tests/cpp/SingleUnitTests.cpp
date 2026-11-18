@@ -114,6 +114,21 @@ TEST_CASE("SingleUnit_EditSeesMacrosActiveAtFileStart") {
     CHECK(errorCount(*server, repo) == 1);
 }
 
+TEST_CASE("Single-unit parse diagnostics respect the document size limit", "[analysis-limit]") {
+    SingleUnitRepo repo("analysis_limit");
+    repo.write(".slang/server.json", R"({"flags": "--single-unit --top top", "maxFileSize": 512})");
+    repo.write("child.sv", "module child(input logic [`W-1:0] a, output logic [`W-1:0] y);\n"
+                           "  `UNKNOWN_CHILD_MACRO\nendmodule\n");
+    repo.write("after.sv", "// " + std::string(512, 'x') +
+                               "\nmodule after_m;\n  `UNKNOWN_AFTER_MACRO\nendmodule\n");
+    auto server = startServer(repo);
+
+    auto errors = errorMessages(*server, repo.uri("child.sv"));
+    REQUIRE(errors.size() == 1);
+    CHECK(errors.front().find("UNKNOWN_CHILD_MACRO") != std::string::npos);
+    CHECK(server->client.getDiagnostics(repo.uri("after.sv")).empty());
+}
+
 TEST_CASE("SingleUnit_EditDoesNotReparseUnit") {
     SingleUnitRepo repo("reparse");
     auto server = startServer(repo);

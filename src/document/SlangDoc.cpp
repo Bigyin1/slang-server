@@ -198,6 +198,11 @@ void SlangDoc::invalidateAnalysis() {
     }
 }
 
+void SlangDoc::releaseAnalysis() {
+    invalidateAnalysis();
+    m_includeCompilation.reset();
+}
+
 std::shared_ptr<ShallowAnalysis> SlangDoc::refreshAnalysis(const lsp::RequestContext& ctx) {
     ctx.throwIfCancelled("before analysis");
     auto tree = getSyntaxTree();

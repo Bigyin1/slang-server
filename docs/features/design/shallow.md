@@ -43,6 +43,59 @@ During shallow analysis of `consumer`, these assertions set `channel.WIDTH` to `
 
 This inference applies to interface ports without a connected instance. In a full design, the connected interface supplies the parameters and the assertions check them. `$static_assert` is a slang extension; ordinary runtime assertions do not provide these constraints.
 
+## Document lifetime and saves
+
+Saving a document updates the workspace index and publishes full-design diagnostics. If all
+source buffers in the selected build are still current, including included headers, the server
+reuses the existing full compilation. This applies to both ordinary compilation units and
+`--single-unit`. Changes to another source or an included header still invalidate the build,
+even when the saved document itself has not changed.
+
+When a document closes, the server releases cached shallow analyses of documents that are no
+longer open, including dependency documents analyzed for navigation. Open documents and requests
+can keep shared analyses alive until they finish using them. Syntax trees remain available for
+the build and dependency discovery; subsequent navigation can recreate a shallow analysis.
+This bounds retention from browsing and closing documents, but does not impose a global memory
+limit or require the allocator to return freed memory to the operating system immediately.
+
+Run the optional ordinary-mode lifecycle benchmark with:
+
+```sh
+build/bin/server_unittests '[document-lifecycle-performance]'
+```
+
+It reports changed and unchanged save times for 128-file and 1500-file builds, plus the number
+and AST allocation size of shallow compilations retained after opening and closing 30 files.
+Normal lifecycle tests check compilation reuse, dependency invalidation, preserved diagnostics,
+reopening documents, and shared-analysis lifetimes without timing thresholds.
+
+Measurements against v0.3.3 on macOS arm64, Apple Clang 21, Release with mimalloc enabled:
+
+| Ordinary-mode workload | Before | After |
+| --- | ---: | ---: |
+| OpenTitan `uart_core.sv`, unchanged save | 411.3 ms | 28.3 ms |
+| OpenTitan `aes_core.sv`, unchanged save | 404.9 ms | 28.4 ms |
+| OpenTitan `adc_ctrl_reg_top.sv`, unchanged save | 402.1 ms | 28.2 ms |
+| OpenTitan changed save, range across these files | 406.3–407.6 ms | 403.2–406.1 ms |
+| 1500 small synthetic sources, unchanged save | 38.6 ms | 19.9 ms |
+| 1500 small synthetic sources, changed save | 38.5 ms | 39.7 ms |
+| OpenTitan cached shallow AST after closing 30 files | 67.6 MiB | 0 MiB |
+| OpenTitan open/close cycle, 30 files | 256.0 ms | 239.5 ms |
+| Synthetic 1500-source build, open/close cycle, 30 files | 3.0 ms | 4.4 ms |
+
+Save timings are medians of three fresh processes, each taking the median of three save cycles
+for OpenTitan or five for the synthetic fixture. Before/after process order was alternated.
+The ordinary OpenTitan fixture uses RTLMeter commit
+`69bbe91e8a2e911ef0562da2b0abab95dd4bbfc2`: 642 syntax trees, 39,379 instances, and 18,138
+diagnostics, whose fingerprints stayed unchanged during comment edits and repeated saves.
+Memory figures count live shallow AST allocations, not total process RSS. The median RSS
+increase during the OpenTitan open/close cycle fell from 166.1 MiB to 60.9 MiB; allocator
+retention and other caches still contribute to RSS.
+
+Closing a document scans the document cache, so cleanup costs grow with the number of known
+documents. Reopening can require another shallow analysis. Unchanged saves still update the
+workspace index and format/publish diagnostics; changed saves still refresh full semantics.
+
 ## Single Unit
 
 Slang's `--single-unit` parses the files in a build as one compilation unit, allowing later files to inherit preprocessor macros from earlier files.
